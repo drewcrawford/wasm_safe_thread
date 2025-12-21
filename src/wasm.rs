@@ -10,196 +10,330 @@ use std::time::Duration;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
+#[wasm_bindgen(inline_js = r#"
+const SELF_URL = import.meta.url;
+
+function normUrl(u) {
+  // Strip trailing ":line:col" if present
+  let s = u.replace(/\):\d+:\d+$/, ")"); // paranoia
+  s = s.replace(/:\d+:\d+$/, "");
+  return s.replace(/[)\s]+$/, "");
+}
+
+function collectUrlsFromStack(stack) {
+  const out = [];
+  const lines = (stack || "").split(/\r?\n/);
+
+  for (const line of lines) {
+    // Firefox/Safari: "name@URL:line:col" or "@URL:line:col"
+    let m = line.match(/@(\S+):\d+:\d+/);
+    if (m && m[1]) out.push(normUrl(m[1]));
+
+    // Chrome: "(URL:line:col)"
+    m = line.match(/\((\S+):\d+:\d+\)/);
+    if (m && m[1]) out.push(normUrl(m[1]));
+
+    // Node style paths also show up sometimes; ignore here (node handled elsewhere)
+  }
+  return out;
+}
+
+function discoverShimUrl() {
+  const stack = (new Error()).stack || "";
+  const urls = collectUrlsFromStack(stack);
+
+  // Filter out our own inline snippet module (and other snippet modules if you want)
+  const filtered = urls.filter(u => u && u !== SELF_URL);
+
+  // Prefer wasm-bindgen-test harness module if present
+  for (const u of filtered) {
+    if (u.endsWith("/wasm-bindgen-test") || u.includes("/wasm-bindgen-test?")) return u;
+  }
+
+  // Otherwise: first non-snippet http(s) URL
+  for (const u of filtered) {
+    if ((u.startsWith("http://") || u.startsWith("https://")) && !u.includes("/snippets/")) return u;
+  }
+
+  // Otherwise just the first remaining candidate
+  return filtered[0] || "";
+}
+
+// --- wasm-bindgen-test / wasm-bindgen export-shape handling ---
+
+function pickExportContainer(m) {
+  // wasm-bindgen can put exports directly on the module namespace (m),
+  // or on the default export (function/object), or on `wasm_bindgen`.
+  if (m && typeof m.wasm_bindgen === "function") return m.wasm_bindgen;
+  if (m && typeof m.default === "function") return m.default;
+  if (m && m.default && typeof m.default === "object") return m.default;
+  return m;
+}
+
+function pickInit(m) {
+  // Common ESM: default export is init()
+  if (m && typeof m.default === "function") return m.default;
+
+  // wasm-bindgen-test / some targets: __wbg_init named export
+  if (m && typeof m.__wbg_init === "function") return m.__wbg_init;
+
+  // Node dynamic-import of CJS: namespace.default is module.exports object
+  if (m && m.default && typeof m.default.__wbg_init === "function") return m.default.__wbg_init;
+  if (m && m.default && typeof m.default.default === "function") return m.default.default;
+
+  // Older global-style: wasm_bindgen function is the init
+  if (m && typeof m.wasm_bindgen === "function") return m.wasm_bindgen;
+  if (m && m.default && typeof m.default.wasm_bindgen === "function") return m.default.wasm_bindgen;
+
+  return null;
+}
+
+function pickEntry(m, name) {
+  if (m && typeof m[name] === "function") return m[name];
+
+  const c = pickExportContainer(m);
+  if (c && typeof c[name] === "function") return c[name];
+
+  // Sometimes on Node/CJS interop exports live under m.default
+  if (m && m.default && typeof m.default[name] === "function") return m.default[name];
+
+  return null;
+}
+
+async function loadShim(spec, entryName) {
+  const m = await import(spec);
+  const init = pickInit(m);
+  const entry = pickEntry(m, entryName);
+
+  if (!init || !entry) {
+    const keys = m ? Object.keys(m) : [];
+    const defKeys = (m && m.default && (typeof m.default === "object" || typeof m.default === "function"))
+      ? Object.keys(m.default)
+      : [];
+    throw new Error(
+      "Could not find init() and/or " + entryName +
+      " in shim module. keys=" + JSON.stringify(keys) +
+      " defaultKeys=" + JSON.stringify(defKeys) +
+      " spec=" + spec
+    );
+  }
+
+  return { init, entry };
+}
+
+// --- Worker script generation ---
+
+function makeCommonHelperScript(entryName) {
+  return `
+    function pickExportContainer(m) {
+      if (m && typeof m.wasm_bindgen === "function") return m.wasm_bindgen;
+      if (m && typeof m.default === "function") return m.default;
+      if (m && m.default && typeof m.default === "object") return m.default;
+      return m;
+    }
+
+    function pickInit(m) {
+      if (m && typeof m.default === "function") return m.default;
+      if (m && typeof m.__wbg_init === "function") return m.__wbg_init;
+      if (m && m.default && typeof m.default.__wbg_init === "function") return m.default.__wbg_init;
+      if (m && m.default && typeof m.default.default === "function") return m.default.default;
+      if (m && typeof m.wasm_bindgen === "function") return m.wasm_bindgen;
+      if (m && m.default && typeof m.default.wasm_bindgen === "function") return m.default.wasm_bindgen;
+      return null;
+    }
+
+    function pickEntry(m, name) {
+      if (m && typeof m[name] === "function") return m[name];
+      const c = pickExportContainer(m);
+      if (c && typeof c[name] === "function") return c[name];
+      if (m && m.default && typeof m.default[name] === "function") return m.default[name];
+      return null;
+    }
+
+    async function loadShim(spec) {
+      const m = await import(spec);
+      const init = pickInit(m);
+      const entry = pickEntry(m, ${JSON.stringify(entryName)});
+
+      if (!init || !entry) {
+        const keys = m ? Object.keys(m) : [];
+        const defKeys = (m && m.default && (typeof m.default === "object" || typeof m.default === "function"))
+          ? Object.keys(m.default)
+          : [];
+        throw new Error(
+          "Could not find init() and/or ${entryName} in shim module. " +
+          "keys=" + JSON.stringify(keys) +
+          " defaultKeys=" + JSON.stringify(defKeys) +
+          " spec=" + spec
+        );
+      }
+      return { init, entry };
+    }
+  `;
+}
+
+function makeBrowserWorkerScript(spec, entryName) {
+  const helpers = makeCommonHelperScript(entryName);
+  return `
+    ${helpers}
+
+    let cached;
+    async function get() { return cached || (cached = loadShim(${JSON.stringify(spec)})); }
+
+    self.onmessage = (e) => {
+      (async () => {
+        const [module, memory, work] = e.data;
+        const { init, entry } = await get();
+        await init(module, memory);
+        entry(work);
+        close();
+      })().catch(err => {
+        console.log(err);
+        setTimeout(() => { throw err; });
+        throw err;
+      });
+    };
+  `;
+}
+
+function makeNodeWorkerScript(spec, entryName) {
+  const helpers = makeCommonHelperScript(entryName);
+  return `
+    import { parentPort } from "node:worker_threads";
+    ${helpers}
+
+    let cached;
+    async function get() { return cached || (cached = loadShim(${JSON.stringify(spec)})); }
+
+    parentPort.on("message", (msg) => {
+      (async () => {
+        const [module, memory, work] = msg;
+        const { init, entry } = await get();
+        await init(module, memory);
+        entry(work);
+        parentPort.close();
+      })().catch(err => {
+        console.log(err);
+        setTimeout(() => { throw err; });
+        throw err;
+      });
+    });
+  `;
+}
+
+
+function spawnWorkerUniversal(shimUrl, module, memory, work, entryName) {
+  // Browser path
+  if (typeof globalThis.Worker === "function") {
+    const spec = shimUrl; // in browser, "/wasm-bindgen-test" or "http://..." is a valid module specifier
+    const src = makeBrowserWorkerScript(spec, entryName);
+
+    const blob = new Blob([src], { type: "text/javascript" });
+    const url = URL.createObjectURL(blob);
+    const w = new Worker(url, { type: "module" });
+    URL.revokeObjectURL(url);
+
+    w.postMessage([module, memory, work]);
+
+    return {
+      postMessage: (msg) => w.postMessage(msg),
+      terminate: () => w.terminate(),
+      setOnMessage: (cb) => { w.onmessage = (e) => cb(e.data); },
+    };
+  }
+
+  // Node path (NO require; queue until imports resolve)
+  if (typeof process !== "undefined" && process.versions && process.versions.node) {
+    let ready = (async () => {
+      const { Worker } = await import("node:worker_threads");
+      const { pathToFileURL } = await import("node:url");
+
+      // Node shimUrl is likely an absolute path like "/private/.../wasm-bindgen-test.js"
+      const spec = (/^(https?:|file:|data:|blob:)/.test(shimUrl))
+        ? shimUrl
+        : pathToFileURL(shimUrl).href;
+
+      const src = makeNodeWorkerScript(spec, entryName);
+      const w = new Worker(src, { eval: true, type: "module" });
+
+      w.postMessage([module, memory, work]);
+      return w;
+    })();
+
+    let onMsg = null;
+
+    return {
+      postMessage: (msg) => { ready.then(w => w.postMessage(msg)); },
+      terminate: () => { ready.then(w => w.terminate()); },
+      setOnMessage: (cb) => {
+        onMsg = (data) => cb(data);
+        ready.then(w => w.on("message", onMsg));
+      },
+    };
+  }
+
+  throw new Error("No Worker (browser) or worker_threads (Node) available");
+}
+
+export function wasm_safe_thread_spawn_worker(work, module, memory) {
+  const shim = discoverShimUrl();
+  if (!shim) throw new Error("Could not discover shim URL via stack trace");
+
+  // Hardcode the Rust export name you want to call inside worker
+  const entryName = "wasm_safe_thread_entry_point";
+  return spawnWorkerUniversal(shim, module, memory, work, entryName);
+}
+"#)]
+extern "C" {
+    fn wasm_safe_thread_spawn_worker(work: JsValue, module: JsValue, memory: JsValue) -> WorkerLike;
+
+    type WorkerLike;
+    #[wasm_bindgen(method, js_name = postMessage)]
+    fn post_message(this: &WorkerLike, msg: &JsValue);
+    #[wasm_bindgen(method)]
+    fn terminate(this: &WorkerLike);
+    #[wasm_bindgen(method, js_name = setOnMessage)]
+    fn set_on_message(this: &WorkerLike, cb: &js_sys::Function);
+}
+
+
+
 #[wasm_bindgen]
 extern "C" {
-    // --- Worker ---
-    type Worker;
-
-    #[wasm_bindgen(constructor, js_class = "Worker")]
-    fn new(url: &str, options: &JsValue) -> Worker;
-
-    #[wasm_bindgen(method, js_name = postMessage)]
-    fn post_message(this: &Worker, msg: &JsValue);
-
-    #[wasm_bindgen(method)]
-    fn terminate(this: &Worker);
-
-    #[wasm_bindgen(method, setter)]
-    fn set_onmessage(this: &Worker, cb: Option<&js_sys::Function>);
-
-    // --- Blob ---
-    type Blob;
-
-    // new Blob(parts, options)
-    #[wasm_bindgen(constructor, js_class = "Blob")]
-    fn new(parts: &JsValue, options: &JsValue) -> Blob;
-
-    // --- URL ---
-    #[wasm_bindgen(js_namespace = URL, js_name = createObjectURL)]
-    fn create_object_url(blob: &Blob) -> String;
-
-    #[wasm_bindgen(js_namespace = URL, js_name = revokeObjectURL)]
-    fn revoke_object_url(url: &str);
-
-    // --- console.log (optional) ---
     #[wasm_bindgen(js_namespace = console, js_name = log)]
-    fn console_log(a: &JsValue);
+    fn console_log_js(v: &JsValue);
 }
 
 fn log_str(s: &str) {
-    console_log(&JsValue::from_str(s));
+    console_log_js(&JsValue::from_str(s));
 }
 
-fn blob_url_from_js_source(js_source: &str) -> String {
-    // parts = [ "....js source..." ]
-    let parts = js_sys::Array::new();
-    parts.push(&JsValue::from_str(js_source));
-
-    // options = { type: "text/javascript" }
-    let opts = js_sys::Object::new();
-    js_sys::Reflect::set(
-        &opts,
-        &JsValue::from_str("type"),
-        &JsValue::from_str("text/javascript"),
-    )
-        .unwrap();
-
-    let blob = Blob::new(&parts.into(), &opts.into());
-    create_object_url(&blob)
-}
 
 pub struct WorkerHandle {
-    worker: Worker,
+    worker: WorkerLike,
     _onmessage: Closure<dyn FnMut(JsValue)>,
-    _url: String,
 }
 
 impl WorkerHandle {
     pub fn post(&self, msg: &JsValue) {
         self.worker.post_message(msg);
     }
-
     pub fn terminate(self) {
         self.worker.terminate();
-        // drop -> callback dropped; url revoked in Drop
     }
 }
 
-impl Drop for WorkerHandle {
-    fn drop(&mut self) {
-        // URL is only needed for initial load; safe to revoke after creation.
-        revoke_object_url(&self._url);
-    }
-}
-
-fn spawn_module_worker_from_source(
-    name: &str,
-    js_source: &str,
-    mut on_msg: impl FnMut(JsValue) + 'static,
-) -> WorkerHandle {
-    let url = blob_url_from_js_source(js_source);
-
-    // options = { type: "module" }
-    let options = js_sys::Object::new();
-    js_sys::Reflect::set(
-        &options,
-        &JsValue::from_str("type"),
-        &JsValue::from_str("module"),
-    )
-        .unwrap();
-    js_sys::Reflect::set(
-        &options,
-        &JsValue::from_str("name"),
-        &JsValue::from_str(&name),
-    )
-        .unwrap();
-
-    let worker = Worker::new(&url, &options.into());
+pub fn spawn_with_shared_module(work: JsValue, mut on_msg: impl FnMut(JsValue) + 'static) -> WorkerHandle {
+    // Note: wasm-bindgen exposes these in both browser and node hosts.
+    let worker = wasm_safe_thread_spawn_worker(work, wasm_bindgen::module(), wasm_bindgen::memory());
 
     let cb = Closure::wrap(Box::new(move |data: JsValue| {
         on_msg(data);
     }) as Box<dyn FnMut(JsValue)>);
 
-    worker.set_onmessage(Some(cb.as_ref().unchecked_ref()));
+    worker.set_on_message(cb.as_ref().unchecked_ref());
 
-    WorkerHandle {
-        worker,
-        _onmessage: cb,
-        _url: url,
-    }
-}
-
-fn make_worker_script_url(shim_url: &str) -> String {
-    // Module worker: import init + your entrypoint from the shim URL we discovered.
-    let script = format!(
-        r#"
-import init, {{ wasm_safe_thread_entry_point }} from "{shim_url}";
-
-self.onmessage = (event) => {{
-  let [module, memory, work] = event.data;
-
-  init(module, memory).catch(err => {{
-    console.log(err);
-    setTimeout(() => {{ throw err; }});
-    throw err;
-  }}).then(() => {{
-    wasm_safe_thread_entry_point(work);
-    close();
-  }});
-}};
-"#
-    );
-
-    let parts = js_sys::Array::new();
-    parts.push(&JsValue::from_str(&script));
-
-    let opts = js_sys::Object::new();
-    js_sys::Reflect::set(&opts, &"type".into(), &"text/javascript".into()).unwrap();
-
-    let blob = Blob::new(&parts.into(), &opts.into());
-    create_object_url(&blob)
-}
-fn get_wasm_bindgen_shim_script_path() -> String {
-// Returns the first captured URL in the stack trace.
-let js = r#"
-(function script_path() {
-  try { throw new Error(); }
-  catch (e) {
-    let parts = (e.stack || "").match(/(?:\(|@)(\S+):\d+:\d+/);
-    return parts && parts[1] ? parts[1] : "";
-  }
-})()
-"#;
-
-js_sys::eval(js).unwrap().as_string().unwrap_or_default()
-}
-
-fn spawn_module_worker_with_shared_module(work: JsValue) -> Worker {
-    let shim_url = get_wasm_bindgen_shim_script_path();
-    if shim_url.is_empty() {
-        panic!("Could not discover wasm-bindgen shim URL via stack trace");
-    }
-    log_str(&format!("shim url: {shim_url}"));
-
-    let worker_script_url = make_worker_script_url(&shim_url);
-
-    // options = { type: "module" }
-    let options = js_sys::Object::new();
-    js_sys::Reflect::set(&options, &"type".into(), &"module".into()).unwrap();
-
-    let worker = Worker::new(&worker_script_url, &options.into());
-
-    //revoked on drop
-
-    // Send [module, memory, work] exactly like wasm_thread.
-    // These are provided by wasm-bindgen at runtime.
-    let arr = js_sys::Array::new();
-    arr.push(&wasm_bindgen::module());
-    arr.push(&wasm_bindgen::memory());
-    arr.push(&work);
-
-    worker.post_message(&arr.into());
-    worker
+    WorkerHandle { worker, _onmessage: cb }
 }
 
 #[wasm_bindgen]
@@ -382,7 +516,9 @@ where
 
 
     // You must provide *absolute* URLs here (served by your app)
-    spawn_module_worker_with_shared_module(wasm_bindgen::module());
+    spawn_with_shared_module(3.into(), |foo| {
+        log_str("on message");
+    });
     JoinHandle {
         _marker: PhantomData,
     }
