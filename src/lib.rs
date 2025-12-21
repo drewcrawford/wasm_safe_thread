@@ -120,6 +120,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn test_spawn_and_join() {
         let handle = spawn(|| 42);
         let result = handle.join().unwrap();

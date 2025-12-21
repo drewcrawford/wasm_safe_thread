@@ -45,6 +45,10 @@ impl<T: 'static> fmt::Debug for LocalKey<T> {
     }
 }
 
+// SAFETY: LocalKey is Sync because each thread accesses its own storage.
+// The key itself is just an accessor, not the actual storage.
+unsafe impl<T: 'static> Sync for LocalKey<T> {}
+
 /// An error returned by [`LocalKey::try_with`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccessError;

@@ -4,3 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+
+[target.'cfg(target_arch="wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.56"
+
+[patch.crates-io]
+# for iter_custom_future testing, logs
+wasm-bindgen = {path = "../wasm-bindgen-drew"}
+wasm-bindgen-test = {path = "../wasm-bindgen-drew/crates/test"}
+wasm-bindgen-futures = {path = "../wasm-bindgen-drew/crates/futures"}
+js-sys = {path = "../wasm-bindgen-drew/crates/js-sys"}
+web-sys = {path = "../wasm-bindgen-drew/crates/web-sys"}
