@@ -15,50 +15,75 @@ use wasm_bindgen::JsCast;
 #[wasm_bindgen(inline_js = r#"
 const SELF_URL = import.meta.url;
 
-function normUrl(u) {
-  // Strip trailing ":line:col" if present
-  let s = u.replace(/\):\d+:\d+$/, ")"); // paranoia
-  s = s.replace(/:\d+:\d+$/, "");
-  return s.replace(/[)\s]+$/, "");
+function stripLineCol(s) {
+  return s.replace(/:\d+:\d+$/, "").replace(/[)\s]+$/, "");
 }
 
-function collectUrlsFromStack(stack) {
+function urlsFromStack(stack) {
   const out = [];
-  const lines = (stack || "").split(/\r?\n/);
-
-  for (const line of lines) {
+  for (const line of (stack || "").split(/\r?\n/)) {
     // Firefox/Safari: "name@URL:line:col" or "@URL:line:col"
     let m = line.match(/@(\S+):\d+:\d+/);
-    if (m && m[1]) out.push(normUrl(m[1]));
+    if (m && m[1]) out.push(stripLineCol(m[1]));
 
-    // Chrome: "(URL:line:col)"
+    // Chrome/Node ESM: "(URL:line:col)"
     m = line.match(/\((\S+):\d+:\d+\)/);
-    if (m && m[1]) out.push(normUrl(m[1]));
+    if (m && m[1]) out.push(stripLineCol(m[1]));
 
-    // Node style paths also show up sometimes; ignore here (node handled elsewhere)
+    // Node sometimes: "at file:///...:line:col" (no parens)
+    m = line.match(/\s(file:\/\/\/\S+):\d+:\d+$/);
+    if (m && m[1]) out.push(stripLineCol(m[1]));
+
+    // Node CJS sometimes: "at /abs/path/file.js:line:col"
+    m = line.match(/\s(\/\S+):\d+:\d+$/);
+    if (m && m[1]) out.push(stripLineCol(m[1]));
   }
   return out;
 }
 
+function isNode() {
+  return typeof process !== "undefined" && process.versions && process.versions.node;
+}
+
+function deriveHarnessFromSelfUrl(selfUrl) {
+  // Works for:
+  //   file:///.../snippets/<crate-hash>/inline0.js  -> file:///.../wasm-bindgen-test.js
+  //   http://.../snippets/<crate-hash>/inline0.js   -> http://.../wasm-bindgen-test
+  const idx = selfUrl.indexOf("/snippets/");
+  if (idx === -1) return "";
+
+  const base = selfUrl.slice(0, idx);
+  return isNode()
+    ? base + "/wasm-bindgen-test.js"
+    : base + "/wasm-bindgen-test";
+}
+
 function discoverShimUrl() {
   const stack = (new Error()).stack || "";
-  const urls = collectUrlsFromStack(stack);
+  const urls = urlsFromStack(stack);
 
-  // Filter out our own inline snippet module (and other snippet modules if you want)
-  const filtered = urls.filter(u => u && u !== SELF_URL);
-
-  // Prefer wasm-bindgen-test harness module if present
-  for (const u of filtered) {
-    if (u.endsWith("/wasm-bindgen-test") || u.includes("/wasm-bindgen-test?")) return u;
+  // 1) Prefer the harness if it appears anywhere
+  for (const u of urls) {
+    if (u.includes("wasm-bindgen-test")) {
+      // Node harness is usually wasm-bindgen-test.js; browser is /wasm-bindgen-test
+      return u;
+    }
   }
 
-  // Otherwise: first non-snippet http(s) URL
+  // 2) Node: derive harness from our own snippet location
+  if (isNode()) {
+    const derived = deriveHarnessFromSelfUrl(SELF_URL);
+    if (derived) return derived;
+  }
+
+  // 3) Browser: skip self (so we don’t pick inline0.js), prefer non-snippet URL
+  const filtered = urls.filter(u => u && u !== SELF_URL);
   for (const u of filtered) {
     if ((u.startsWith("http://") || u.startsWith("https://")) && !u.includes("/snippets/")) return u;
   }
 
-  // Otherwise just the first remaining candidate
-  return filtered[0] || "";
+  // 4) Last resort: something (even self) so we fail later with good debug
+  return filtered[0] || SELF_URL || "";
 }
 
 // --- wasm-bindgen-test / wasm-bindgen export-shape handling ---
@@ -408,8 +433,8 @@ pub struct JoinHandle<T> {
 
 impl<T> JoinHandle<T> {
     /// Waits for the thread to finish and returns its result.
-    pub fn join(self) -> Result<T, Box<dyn std::any::Any + Send + 'static>> {
-        self.receiver.recv_sync().map_err(|e| Box::new(e) as Box<dyn std::any::Any + Send + 'static>)
+    pub fn join(self) -> Result<T, Box<String>> {
+        self.receiver.recv_sync().map_err(|e| Box::new(format!("{:?}",e)) as Box<String>)
     }
 
     /// Gets the thread associated with this handle.
@@ -513,10 +538,11 @@ where
     T: Send + 'static,
 {
     let (send,recv) = wasm_safe_mutex::mpsc::channel();
-    let closure = || {
+    let closure = move || {
         let result = f();
         send.send_sync(result).unwrap();
     };
+    std::mem::forget(closure); //todo: pass this in somehow
 
 
     // You must provide *absolute* URLs here (served by your app)
