@@ -189,8 +189,7 @@ fn spawn_module_worker_with_shared_module(work: JsValue) -> Worker {
 
     let worker = Worker::new(&worker_script_url, &options.into());
 
-    // Script URL only needed for construction; revoke immediately.
-    revoke_object_url(&worker_script_url);
+    //revoked on drop
 
     // Send [module, memory, work] exactly like wasm_thread.
     // These are provided by wasm-bindgen at runtime.
