@@ -12,38 +12,93 @@ use wasm_bindgen::JsCast;
 
 #[wasm_bindgen]
 extern "C" {
-    // Bind the JS class `Worker`
+    // --- Worker ---
     type Worker;
 
-    // new Worker(url, options?)
     #[wasm_bindgen(constructor, js_class = "Worker")]
     fn new(url: &str, options: &JsValue) -> Worker;
 
-    // worker.postMessage(msg)
     #[wasm_bindgen(method, js_name = postMessage)]
     fn post_message(this: &Worker, msg: &JsValue);
 
-    // worker.terminate()
     #[wasm_bindgen(method)]
     fn terminate(this: &Worker);
 
-    // worker.onmessage = ...
     #[wasm_bindgen(method, setter)]
     fn set_onmessage(this: &Worker, cb: Option<&js_sys::Function>);
-}
 
-#[wasm_bindgen]
-extern "C" {
+    // --- Blob ---
+    type Blob;
+
+    // new Blob(parts, options)
+    #[wasm_bindgen(constructor, js_class = "Blob")]
+    fn new(parts: &JsValue, options: &JsValue) -> Blob;
+
+    // --- URL ---
+    #[wasm_bindgen(js_namespace = URL, js_name = createObjectURL)]
+    fn create_object_url(blob: &Blob) -> String;
+
+    #[wasm_bindgen(js_namespace = URL, js_name = revokeObjectURL)]
+    fn revoke_object_url(url: &str);
+
+    // --- console.log (optional) ---
     #[wasm_bindgen(js_namespace = console, js_name = log)]
     fn console_log(a: &JsValue);
-
 }
 
 fn log_str(s: &str) {
     console_log(&JsValue::from_str(s));
 }
 
-fn spawn_module_worker(url: &str, on_msg: impl FnMut(JsValue) + 'static) -> Worker {
+fn blob_url_from_js_source(js_source: &str) -> String {
+    // parts = [ "....js source..." ]
+    let parts = js_sys::Array::new();
+    parts.push(&JsValue::from_str(js_source));
+
+    // options = { type: "text/javascript" }
+    let opts = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &opts,
+        &JsValue::from_str("type"),
+        &JsValue::from_str("text/javascript"),
+    )
+        .unwrap();
+
+    let blob = Blob::new(&parts.into(), &opts.into());
+    create_object_url(&blob)
+}
+
+pub struct WorkerHandle {
+    worker: Worker,
+    _onmessage: Closure<dyn FnMut(JsValue)>,
+    _url: String,
+}
+
+impl WorkerHandle {
+    pub fn post(&self, msg: &JsValue) {
+        self.worker.post_message(msg);
+    }
+
+    pub fn terminate(self) {
+        self.worker.terminate();
+        // drop -> callback dropped; url revoked in Drop
+    }
+}
+
+impl Drop for WorkerHandle {
+    fn drop(&mut self) {
+        // URL is only needed for initial load; safe to revoke after creation.
+        revoke_object_url(&self._url);
+    }
+}
+
+fn spawn_module_worker_from_source(
+    name: &str,
+    js_source: &str,
+    mut on_msg: impl FnMut(JsValue) + 'static,
+) -> WorkerHandle {
+    let url = blob_url_from_js_source(js_source);
+
     // options = { type: "module" }
     let options = js_sys::Object::new();
     js_sys::Reflect::set(
@@ -52,16 +107,41 @@ fn spawn_module_worker(url: &str, on_msg: impl FnMut(JsValue) + 'static) -> Work
         &JsValue::from_str("module"),
     )
         .unwrap();
+    js_sys::Reflect::set(
+        &options,
+        &JsValue::from_str("name"),
+        &JsValue::from_str(&name),
+    )
+        .unwrap();
 
-    let worker = Worker::new(url, &options.into());
+    let worker = Worker::new(&url, &options.into());
 
-    let cb = Closure::wrap(Box::new(on_msg) as Box<dyn FnMut(JsValue)>);
+    let cb = Closure::wrap(Box::new(move |data: JsValue| {
+        on_msg(data);
+    }) as Box<dyn FnMut(JsValue)>);
+
     worker.set_onmessage(Some(cb.as_ref().unchecked_ref()));
 
-    // Keep callback alive forever (or store it in a struct instead)
-    cb.forget();
+    WorkerHandle {
+        worker,
+        _onmessage: cb,
+        _url: url,
+    }
+}
 
-    worker
+
+const WORKER_ECHO: &str = r#"
+self.onmessage = (e) => {
+  self.postMessage({ kind: "echo", data: e.data });
+};
+"#;
+
+pub fn spawn_echo_worker() -> WorkerHandle {
+    spawn_module_worker_from_source("echo",WORKER_ECHO, |msg| {
+        log_str("got message from worker");
+        // msg is a JsValue; decode it however you like
+        let _ = msg;
+    })
 }
 
 /// A thread local storage key which owns its contents.
@@ -127,7 +207,7 @@ pub struct JoinHandle<T> {
 impl<T> JoinHandle<T> {
     /// Waits for the thread to finish and returns its result.
     pub fn join(self) -> Result<T, Box<dyn std::any::Any + Send + 'static>> {
-        panic!("Not implemented");
+        panic!("join not implemented");
         // log_str("todo: join");
         // //shitty UB
         // unsafe { MaybeUninit::zeroed().assume_init() }
@@ -233,9 +313,7 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    spawn_module_worker("bad url", |something| {
-        panic!("bye");
-    });
+    spawn_echo_worker();
     JoinHandle {
         _marker: PhantomData,
     }
