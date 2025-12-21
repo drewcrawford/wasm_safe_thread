@@ -3,8 +3,66 @@
 use std::fmt;
 use std::io;
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
 use std::time::Duration;
+
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+
+#[wasm_bindgen]
+extern "C" {
+    // Bind the JS class `Worker`
+    type Worker;
+
+    // new Worker(url, options?)
+    #[wasm_bindgen(constructor, js_class = "Worker")]
+    fn new(url: &str, options: &JsValue) -> Worker;
+
+    // worker.postMessage(msg)
+    #[wasm_bindgen(method, js_name = postMessage)]
+    fn post_message(this: &Worker, msg: &JsValue);
+
+    // worker.terminate()
+    #[wasm_bindgen(method)]
+    fn terminate(this: &Worker);
+
+    // worker.onmessage = ...
+    #[wasm_bindgen(method, setter)]
+    fn set_onmessage(this: &Worker, cb: Option<&js_sys::Function>);
+}
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = log)]
+    fn console_log(a: &JsValue);
+
+}
+
+fn log_str(s: &str) {
+    console_log(&JsValue::from_str(s));
+}
+
+fn spawn_module_worker(url: &str, on_msg: impl FnMut(JsValue) + 'static) -> Worker {
+    // options = { type: "module" }
+    let options = js_sys::Object::new();
+    js_sys::Reflect::set(
+        &options,
+        &JsValue::from_str("type"),
+        &JsValue::from_str("module"),
+    )
+        .unwrap();
+
+    let worker = Worker::new(url, &options.into());
+
+    let cb = Closure::wrap(Box::new(on_msg) as Box<dyn FnMut(JsValue)>);
+    worker.set_onmessage(Some(cb.as_ref().unchecked_ref()));
+
+    // Keep callback alive forever (or store it in a struct instead)
+    cb.forget();
+
+    worker
+}
 
 /// A thread local storage key which owns its contents.
 pub struct LocalKey<T: 'static> {
@@ -69,7 +127,10 @@ pub struct JoinHandle<T> {
 impl<T> JoinHandle<T> {
     /// Waits for the thread to finish and returns its result.
     pub fn join(self) -> Result<T, Box<dyn std::any::Any + Send + 'static>> {
-        todo!("wasm JoinHandle::join")
+        panic!("Not implemented");
+        // log_str("todo: join");
+        // //shitty UB
+        // unsafe { MaybeUninit::zeroed().assume_init() }
     }
 
     /// Gets the thread associated with this handle.
@@ -172,7 +233,12 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    todo!("wasm spawn")
+    spawn_module_worker("bad url", |something| {
+        panic!("bye");
+    });
+    JoinHandle {
+        _marker: PhantomData,
+    }
 }
 
 /// Gets a handle to the thread that invokes it.
