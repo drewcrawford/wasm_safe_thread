@@ -129,19 +129,86 @@ fn spawn_module_worker_from_source(
     }
 }
 
+fn make_worker_script_url(shim_url: &str) -> String {
+    // Module worker: import init + your entrypoint from the shim URL we discovered.
+    let script = format!(
+        r#"
+import init, {{ wasm_safe_thread_entry_point }} from "{shim_url}";
 
-const WORKER_ECHO: &str = r#"
-self.onmessage = (e) => {
-  self.postMessage({ kind: "echo", data: e.data });
-};
+self.onmessage = (event) => {{
+  let [module, memory, work] = event.data;
+
+  init(module, memory).catch(err => {{
+    console.log(err);
+    setTimeout(() => {{ throw err; }});
+    throw err;
+  }}).then(() => {{
+    wasm_safe_thread_entry_point(work);
+    close();
+  }});
+}};
+"#
+    );
+
+    let parts = js_sys::Array::new();
+    parts.push(&JsValue::from_str(&script));
+
+    let opts = js_sys::Object::new();
+    js_sys::Reflect::set(&opts, &"type".into(), &"text/javascript".into()).unwrap();
+
+    let blob = Blob::new(&parts.into(), &opts.into());
+    create_object_url(&blob)
+}
+fn get_wasm_bindgen_shim_script_path() -> String {
+// Returns the first captured URL in the stack trace.
+let js = r#"
+(function script_path() {
+  try { throw new Error(); }
+  catch (e) {
+    let parts = (e.stack || "").match(/(?:\(|@)(\S+):\d+:\d+/);
+    return parts && parts[1] ? parts[1] : "";
+  }
+})()
 "#;
 
-pub fn spawn_echo_worker() -> WorkerHandle {
-    spawn_module_worker_from_source("echo",WORKER_ECHO, |msg| {
-        log_str("got message from worker");
-        // msg is a JsValue; decode it however you like
-        let _ = msg;
-    })
+js_sys::eval(js).unwrap().as_string().unwrap_or_default()
+}
+
+fn spawn_module_worker_with_shared_module(work: JsValue) -> Worker {
+    let shim_url = get_wasm_bindgen_shim_script_path();
+    if shim_url.is_empty() {
+        panic!("Could not discover wasm-bindgen shim URL via stack trace");
+    }
+    log_str(&format!("shim url: {shim_url}"));
+
+    let worker_script_url = make_worker_script_url(&shim_url);
+
+    // options = { type: "module" }
+    let options = js_sys::Object::new();
+    js_sys::Reflect::set(&options, &"type".into(), &"module".into()).unwrap();
+
+    let worker = Worker::new(&worker_script_url, &options.into());
+
+    // Script URL only needed for construction; revoke immediately.
+    revoke_object_url(&worker_script_url);
+
+    // Send [module, memory, work] exactly like wasm_thread.
+    // These are provided by wasm-bindgen at runtime.
+    let arr = js_sys::Array::new();
+    arr.push(&wasm_bindgen::module());
+    arr.push(&wasm_bindgen::memory());
+    arr.push(&work);
+
+    worker.post_message(&arr.into());
+    worker
+}
+
+#[wasm_bindgen]
+pub fn wasm_safe_thread_entry_point(work: JsValue) {
+    log_str("hi");
+    // `work` can be a pointer, an index into a table, etc.
+    // For now:
+    let _ = work;
 }
 
 /// A thread local storage key which owns its contents.
@@ -313,7 +380,10 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    spawn_echo_worker();
+
+
+    // You must provide *absolute* URLs here (served by your app)
+    spawn_module_worker_with_shared_module(wasm_bindgen::module());
     JoinHandle {
         _marker: PhantomData,
     }
