@@ -14,7 +14,57 @@ use std::io;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-pub use backend::{Builder, JoinHandle, Thread, ThreadId};
+pub use backend::{AccessError, Builder, JoinHandle, LocalKey, Thread, ThreadId};
+
+/// Declare a new thread local storage key of type [`LocalKey`].
+///
+/// # Examples
+///
+/// ```
+/// use wasm_safe_thread::thread_local;
+/// use std::cell::RefCell;
+///
+/// thread_local! {
+///     static FOO: RefCell<u32> = RefCell::new(1);
+/// }
+///
+/// FOO.with(|f| {
+///     assert_eq!(*f.borrow(), 1);
+///     *f.borrow_mut() = 2;
+/// });
+/// ```
+#[macro_export]
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! thread_local {
+    ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = $init:expr; $($rest:tt)*) => {
+        std::thread_local! {
+            $(#[$attr])* static INNER: $t = $init;
+        }
+        $(#[$attr])* $vis static $name: $crate::LocalKey<$t> = $crate::LocalKey::new(&INNER);
+        $crate::thread_local!($($rest)*);
+    };
+    ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = $init:expr) => {
+        std::thread_local! {
+            $(#[$attr])* static INNER: $t = $init;
+        }
+        $(#[$attr])* $vis static $name: $crate::LocalKey<$t> = $crate::LocalKey::new(&INNER);
+    };
+    () => {};
+}
+
+/// Declare a new thread local storage key of type [`LocalKey`].
+#[macro_export]
+#[cfg(target_arch = "wasm32")]
+macro_rules! thread_local {
+    ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = $init:expr; $($rest:tt)*) => {
+        $(#[$attr])* $vis static $name: $crate::LocalKey<$t> = $crate::LocalKey::new(|| $init);
+        $crate::thread_local!($($rest)*);
+    };
+    ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = $init:expr) => {
+        $(#[$attr])* $vis static $name: $crate::LocalKey<$t> = $crate::LocalKey::new(|| $init);
+    };
+    () => {};
+}
 
 /// Spawns a new thread, returning a JoinHandle for it.
 pub fn spawn<F, T>(f: F) -> JoinHandle<T>
@@ -106,5 +156,35 @@ mod tests {
         let parallelism = available_parallelism().unwrap();
         println!("available_parallelism: {}", parallelism);
         assert!(parallelism.get() >= 1);
+    }
+
+    #[test]
+    fn test_thread_local() {
+        use std::cell::Cell;
+
+        thread_local! {
+            static COUNTER: Cell<u32> = Cell::new(0);
+        }
+
+        COUNTER.with(|c| {
+            assert_eq!(c.get(), 0);
+            c.set(42);
+        });
+
+        COUNTER.with(|c| {
+            assert_eq!(c.get(), 42);
+        });
+    }
+
+    #[test]
+    fn test_thread_local_try_with() {
+        use std::cell::Cell;
+
+        thread_local! {
+            static VALUE: Cell<i32> = Cell::new(100);
+        }
+
+        let result = VALUE.try_with(|v| v.get());
+        assert_eq!(result.unwrap(), 100);
     }
 }

@@ -4,6 +4,56 @@ use std::thread;
 use std::time::Duration;
 use std::io;
 use std::num::NonZeroUsize;
+use std::fmt;
+
+/// A thread local storage key which owns its contents.
+pub struct LocalKey<T: 'static> {
+    inner: &'static std::thread::LocalKey<T>,
+}
+
+impl<T: 'static> LocalKey<T> {
+    /// Creates a new `LocalKey` wrapping a std `LocalKey`.
+    #[doc(hidden)]
+    pub const fn new(inner: &'static std::thread::LocalKey<T>) -> Self {
+        LocalKey { inner }
+    }
+
+    /// Acquires a reference to the value in this TLS key.
+    pub fn with<F, R>(&'static self, f: F) -> R
+    where
+        F: FnOnce(&T) -> R,
+    {
+        self.inner.with(f)
+    }
+
+    /// Acquires a reference to the value in this TLS key.
+    ///
+    /// Returns `Err(AccessError)` if the key is being destroyed or was already destroyed.
+    pub fn try_with<F, R>(&'static self, f: F) -> Result<R, AccessError>
+    where
+        F: FnOnce(&T) -> R,
+    {
+        self.inner.try_with(f).map_err(|_| AccessError)
+    }
+}
+
+impl<T: 'static> fmt::Debug for LocalKey<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalKey").finish_non_exhaustive()
+    }
+}
+
+/// An error returned by [`LocalKey::try_with`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccessError;
+
+impl fmt::Display for AccessError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "already destroyed or being destroyed")
+    }
+}
+
+impl std::error::Error for AccessError {}
 
 /// A handle to a thread.
 pub struct JoinHandle<T>(thread::JoinHandle<T>);
