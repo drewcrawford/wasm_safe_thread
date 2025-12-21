@@ -120,12 +120,19 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn test_spawn_and_join() {
         let handle = spawn(|| 42);
         let result = handle.join().unwrap();
         assert_eq!(result, 42);
     }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    async fn test_spawn_and_join_async() {
+        let handle = spawn(|| 42);
+        let result = handle.join_async().await.unwrap();
+        assert_eq!(result, 42);
+    }
+
 
     #[test]
     fn test_builder() {

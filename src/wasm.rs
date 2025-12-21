@@ -366,9 +366,11 @@ pub fn spawn_with_shared_module(work: JsValue, mut on_msg: impl FnMut(JsValue) +
 #[wasm_bindgen]
 pub fn wasm_safe_thread_entry_point(work: JsValue) {
     log_str("hi");
-    // `work` can be a pointer, an index into a table, etc.
-    // For now:
-    let _ = work;
+    let ptr = work.as_f64().unwrap() as usize;
+    // SAFETY: ptr came from Box::into_raw in spawn(), and we're the only consumer
+    let boxed = unsafe { Box::from_raw(ptr as *mut Box<dyn FnOnce() + Send>) };
+    let closure = *boxed;
+    closure();
 }
 
 /// A thread local storage key which owns its contents.
@@ -435,6 +437,10 @@ impl<T> JoinHandle<T> {
     /// Waits for the thread to finish and returns its result.
     pub fn join(self) -> Result<T, Box<String>> {
         self.receiver.recv_sync().map_err(|e| Box::new(format!("{:?}",e)) as Box<String>)
+    }
+
+    pub async fn join_async(self) -> Result<T, Box<String>> {
+        self.receiver.recv_async().await.map_err(|e| Box::new(format!("{:?}",e)) as Box<String>)
     }
 
     /// Gets the thread associated with this handle.
@@ -542,11 +548,13 @@ where
         let result = f();
         send.send_sync(result).unwrap();
     };
-    std::mem::forget(closure); //todo: pass this in somehow
 
+    // Double-box to get a thin pointer (Box<dyn FnOnce()> is a fat pointer)
+    let boxed: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(closure));
+    let ptr = Box::into_raw(boxed) as *mut () as usize;
+    let work: JsValue = (ptr as f64).into();
 
-    // You must provide *absolute* URLs here (served by your app)
-    spawn_with_shared_module(3.into(), |foo| {
+    spawn_with_shared_module(work, |_| {
         log_str("on message");
     });
     JoinHandle {
