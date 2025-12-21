@@ -188,4 +188,62 @@ mod tests {
         let result = VALUE.try_with(|v| v.get());
         assert_eq!(result.unwrap(), 100);
     }
+
+    #[test]
+    fn test_spawn_hook_single() {
+        use std::sync::{Arc, Mutex};
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let order_clone = order.clone();
+        let order_main = order.clone();
+
+        let handle = Builder::new()
+            .spawn_hook(move || {
+                order_clone.lock().unwrap().push(1);
+            })
+            .spawn(move || {
+                order_main.lock().unwrap().push(2);
+            })
+            .unwrap();
+
+        handle.join().unwrap();
+
+        let result = order.lock().unwrap();
+        assert_eq!(*result, vec![1, 2], "hook should run before main function");
+    }
+
+    #[test]
+    fn test_spawn_hook_multiple_in_order() {
+        use std::sync::{Arc, Mutex};
+
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let o1 = order.clone();
+        let o2 = order.clone();
+        let o3 = order.clone();
+        let o_main = order.clone();
+
+        let handle = Builder::new()
+            .spawn_hook(move || {
+                o1.lock().unwrap().push(1);
+            })
+            .spawn_hook(move || {
+                o2.lock().unwrap().push(2);
+            })
+            .spawn_hook(move || {
+                o3.lock().unwrap().push(3);
+            })
+            .spawn(move || {
+                o_main.lock().unwrap().push(100);
+            })
+            .unwrap();
+
+        handle.join().unwrap();
+
+        let result = order.lock().unwrap();
+        assert_eq!(
+            *result,
+            vec![1, 2, 3, 100],
+            "hooks should run in order before main function"
+        );
+    }
 }

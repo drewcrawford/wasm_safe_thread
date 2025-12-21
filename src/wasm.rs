@@ -114,6 +114,7 @@ pub struct ThreadId(u64);
 pub struct Builder {
     _name: Option<String>,
     _stack_size: Option<usize>,
+    _spawn_hooks: Vec<Box<dyn FnOnce() + Send + 'static>>,
 }
 
 impl Builder {
@@ -122,6 +123,7 @@ impl Builder {
         Builder {
             _name: None,
             _stack_size: None,
+            _spawn_hooks: Vec::new(),
         }
     }
 
@@ -134,6 +136,17 @@ impl Builder {
     /// Sets the stack size for the new thread.
     pub fn stack_size(mut self, size: usize) -> Self {
         self._stack_size = Some(size);
+        self
+    }
+
+    /// Registers a hook to run at the beginning of the spawned thread.
+    ///
+    /// Multiple hooks can be registered and they will run in the order they were added.
+    pub fn spawn_hook<H>(mut self, hook: H) -> Self
+    where
+        H: FnOnce() + Send + 'static,
+    {
+        self._spawn_hooks.push(Box::new(hook));
         self
     }
 

@@ -106,6 +106,7 @@ pub struct ThreadId(thread::ThreadId);
 /// A builder for configuring and spawning threads.
 pub struct Builder {
     inner: thread::Builder,
+    spawn_hooks: Vec<Box<dyn FnOnce() + Send + 'static>>,
 }
 
 impl Builder {
@@ -113,6 +114,7 @@ impl Builder {
     pub fn new() -> Self {
         Builder {
             inner: thread::Builder::new(),
+            spawn_hooks: Vec::new(),
         }
     }
 
@@ -128,13 +130,32 @@ impl Builder {
         self
     }
 
+    /// Registers a hook to run at the beginning of the spawned thread.
+    ///
+    /// Multiple hooks can be registered and they will run in the order they were added.
+    pub fn spawn_hook<H>(mut self, hook: H) -> Self
+    where
+        H: FnOnce() + Send + 'static,
+    {
+        self.spawn_hooks.push(Box::new(hook));
+        self
+    }
+
     /// Spawns a new thread with this builder's configuration.
     pub fn spawn<F, T>(self, f: F) -> io::Result<JoinHandle<T>>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        self.inner.spawn(f).map(JoinHandle)
+        let Builder { inner, spawn_hooks } = self;
+        inner
+            .spawn(move || {
+                for hook in spawn_hooks {
+                    hook();
+                }
+                f()
+            })
+            .map(JoinHandle)
     }
 }
 
