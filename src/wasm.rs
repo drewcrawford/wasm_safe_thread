@@ -5,6 +5,8 @@ use std::io;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use wasm_bindgen::prelude::*;
@@ -401,16 +403,13 @@ impl std::error::Error for AccessError {}
 
 /// A handle to a thread.
 pub struct JoinHandle<T> {
-    _marker: std::marker::PhantomData<T>,
+    receiver: wasm_safe_mutex::mpsc::Receiver<T>,
 }
 
 impl<T> JoinHandle<T> {
     /// Waits for the thread to finish and returns its result.
     pub fn join(self) -> Result<T, Box<dyn std::any::Any + Send + 'static>> {
-        panic!("join not implemented");
-        // log_str("todo: join");
-        // //shitty UB
-        // unsafe { MaybeUninit::zeroed().assume_init() }
+        self.receiver.recv_sync().map_err(|e| Box::new(e) as Box<dyn std::any::Any + Send + 'static>)
     }
 
     /// Gets the thread associated with this handle.
@@ -508,11 +507,16 @@ impl Default for Builder {
 }
 
 /// Spawns a new thread, returning a JoinHandle for it.
-pub fn spawn<F, T>(_f: F) -> JoinHandle<T>
+pub fn spawn<F, T>(f: F) -> JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    let (send,recv) = wasm_safe_mutex::mpsc::channel();
+    let closure = || {
+        let result = f();
+        send.send_sync(result).unwrap();
+    };
 
 
     // You must provide *absolute* URLs here (served by your app)
@@ -520,7 +524,7 @@ where
         log_str("on message");
     });
     JoinHandle {
-        _marker: PhantomData,
+        receiver: recv,
     }
 }
 
