@@ -1,10 +1,10 @@
 //! WebAssembly backend - placeholder implementation
 
-use std::time::Duration;
-use std::io;
-use std::num::NonZeroUsize;
 use std::fmt;
+use std::io;
 use std::marker::PhantomData;
+use std::num::NonZeroUsize;
+use std::time::Duration;
 
 /// A thread local storage key which owns its contents.
 pub struct LocalKey<T: 'static> {
@@ -15,7 +15,9 @@ impl<T: 'static> LocalKey<T> {
     /// Creates a new `LocalKey`.
     #[doc(hidden)]
     pub const fn new(_init: fn() -> T) -> Self {
-        LocalKey { _marker: PhantomData }
+        LocalKey {
+            _marker: PhantomData,
+        }
     }
 
     /// Acquires a reference to the value in this TLS key.

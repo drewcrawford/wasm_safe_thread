@@ -1,10 +1,10 @@
 //! Standard library backend - forwards to std::thread
 
-use std::thread;
-use std::time::Duration;
+use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
-use std::fmt;
+use std::thread;
+use std::time::Duration;
 
 /// A thread local storage key which owns its contents.
 pub struct LocalKey<T: 'static> {
