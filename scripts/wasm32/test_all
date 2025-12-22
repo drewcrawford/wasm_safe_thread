@@ -1,0 +1,11 @@
+#!/bin/bash
+echo "======default======"
+./scripts/wasm32/tests
+echo "======node experimental======"
+WASM_BINDGEN_USE_NODE_EXPERIMENTAL=1 ./scripts/wasm32/tests
+echo "=====browser======"
+WASM_BINDGEN_USE_BROWSER=1 ./scripts/wasm32/tests
+echo "=====chrome======"
+CHROMEDRIVER=`which chromedriver` WASM_BINDGEN_USE_BROWSER=1 ./scripts/wasm32/tests
+echo "=====safari======"
+SAFARIDRIVER=`which safaridriver` WASM_BINDGEN_USE_BROWSER=1 ./scripts/wasm32/tests

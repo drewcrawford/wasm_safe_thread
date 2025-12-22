@@ -10,6 +10,7 @@ wasm_safe_mutex = "0.1.2"
 
 [target.'cfg(target_arch="wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3.56"
+console_error_panic_hook = "0.1.7"
 
 [patch.crates-io]
 # for iter_custom_future testing, logs

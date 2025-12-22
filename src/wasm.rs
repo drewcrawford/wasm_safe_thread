@@ -60,21 +60,21 @@ function discoverShimUrl() {
   const stack = (new Error()).stack || "";
   const urls = urlsFromStack(stack);
 
-  // 1) Prefer the harness if it appears anywhere
+  // 1) Prefer the harness if it appears anywhere in the stack
   for (const u of urls) {
     if (u.includes("wasm-bindgen-test")) return u;
   }
 
-  // 2) Node: derive harness from our own snippet location
-  if (isNode()) {
-    const derived = deriveHarnessFromSelfUrl(SELF_URL);
-    if (derived) return derived;
-  }
+  // 2) Derive harness from our own snippet location (works for both Node and browser)
+  // Our inline0.js is at .../snippets/<crate-hash>/inline0.js
+  // The main shim is at .../wasm-bindgen-test (browser) or .../wasm-bindgen-test.js (Node)
+  const derived = deriveHarnessFromSelfUrl(SELF_URL);
+  if (derived) return derived;
 
-  // 3) Browser: skip self (so we don’t pick inline0.js), prefer non-snippet URL
+  // 3) Skip self (so we don't pick inline0.js), prefer non-snippet URL
   const filtered = urls.filter(u => u && u !== SELF_URL);
   for (const u of filtered) {
-    if ((u.startsWith("http://") || u.startsWith("https://")) && !u.includes("/snippets/")) return u;
+    if ((u.startsWith("http://") || u.startsWith("https://") || u.startsWith("file://")) && !u.includes("/snippets/")) return u;
   }
 
   // 4) Last resort: something (even self) so we fail later with good debug
@@ -90,6 +90,9 @@ function discoverShimUrl() {
 function makeCommonHelperScript(entryName) {
   return `
     function pickInitStrict(m) {
+      // wasm-bindgen-test: named initSync export (takes module, memory directly)
+      if (m && typeof m.initSync === "function") return m.initSync;
+
       // wasm-bindgen-test (sometimes): named __wbg_init
       if (m && typeof m.__wbg_init === "function") return m.__wbg_init;
 
@@ -97,6 +100,7 @@ function makeCommonHelperScript(entryName) {
       if (m && typeof m.default === "function") return m.default;
 
       // Node ESM importing a CJS harness: namespace.default is module.exports object
+      if (m && m.default && typeof m.default.initSync === "function") return m.default.initSync;
       if (m && m.default && typeof m.default.__wbg_init === "function") return m.default.__wbg_init;
       if (m && m.default && typeof m.default.default === "function") return m.default.default;
       if (m && m.default && typeof m.default === "function") return m.default;
@@ -178,23 +182,62 @@ function makeBrowserWorkerScript(spec, entryName) {
 }
 
 function makeNodeWorkerScript(spec, entryName) {
-  const helpers = makeCommonHelperScript(entryName);
+  // Worker script for Node.js (works with both ESM and CJS shims)
+  //
+  // For ESM: the main shim has initSync and exports from _bg.js
+  // For CJS: the main shim has initSync and all exports in one file
+  //
+  // CRITICAL: In Node.js, modules are cached and shared between main thread
+  // and worker threads. We bust the cache by adding a unique query param.
+  // This ensures each worker gets its own module state.
   return `
-    import { parentPort } from "node:worker_threads";
-    ${helpers}
+    import { parentPort, threadId } from "node:worker_threads";
 
-    let cached;
-    async function get() { return cached || (cached = loadShim(${JSON.stringify(spec)})); }
+    const SHIM_URL = ${JSON.stringify(spec)};
+    // Cache-busting query param ensures each worker gets fresh module state
+    const WORKER_SHIM_URL = SHIM_URL + '?worker=' + threadId;
+
+    let shimPromise = null;
+    async function getShim() {
+      if (!shimPromise) {
+        shimPromise = import(WORKER_SHIM_URL);
+      }
+      return shimPromise;
+    }
 
     parentPort.on("message", (msg) => {
       (async () => {
-        const [module, memory, work] = msg;
-        const { init, entry } = await get();
+        const [wasmModule, sharedMemory, work] = msg;
+        const shim = await getShim();
 
-        // STRICT: do not swallow errors
-        await init(module, memory);
+        // Both ESM and CJS shims now export initSync
+        // For CJS, the exports are on shim.default
+        const initSync = shim.initSync || (shim.default && shim.default.initSync);
+        if (typeof initSync !== "function") {
+          const keys = Object.keys(shim);
+          const defKeys = shim.default ? Object.keys(shim.default) : [];
+          throw new Error("Missing initSync in shim. keys=" + JSON.stringify(keys) + " defaultKeys=" + JSON.stringify(defKeys));
+        }
 
+        // Initialize with the shared module and memory
+        // thread_stack_size tells the runtime this is a worker thread
+        const WORKER_STACK_SIZE = 1048576; // 1MB stack for worker
+        initSync({
+          module: wasmModule,
+          memory: sharedMemory,
+          thread_stack_size: WORKER_STACK_SIZE
+        });
+
+        // Get entry point function
+        const entry = shim[${JSON.stringify(entryName)}] || (shim.default && shim.default[${JSON.stringify(entryName)}]);
+        if (typeof entry !== "function") {
+          throw new Error("Missing entry point: " + ${JSON.stringify(entryName)} + " in shim");
+        }
+
+        // Run the entry point
+        console.log("Worker: About to call entry point with work =", work);
         entry(work);
+        console.log("Worker: Entry point returned");
         parentPort.close();
       })().catch(err => {
         console.log(err);
@@ -288,11 +331,13 @@ fn log_str(s: &str) {
     console_log_js(&JsValue::from_str(s));
 }
 
+#[allow(dead_code)]
 pub struct WorkerHandle {
     worker: WorkerLike,
     _onmessage: Closure<dyn FnMut(JsValue)>,
 }
 
+#[allow(dead_code)]
 impl WorkerHandle {
     pub fn post(&self, msg: &JsValue) {
         self.worker.post_message(msg);
@@ -319,14 +364,19 @@ pub fn spawn_with_shared_module(work: JsValue, mut on_msg: impl FnMut(JsValue) +
 
 #[wasm_bindgen]
 pub fn wasm_safe_thread_entry_point(work: JsValue) {
-    log_str("hi");
+    log_str("entry_point: start");
 
     let ptr = work.as_f64().unwrap() as usize;
+    log_str(&format!("entry_point: ptr = {:#x}", ptr));
 
     // SAFETY: ptr came from Box::into_raw in spawn(), and we're the only consumer
+    log_str("entry_point: about to Box::from_raw");
     let boxed = unsafe { Box::from_raw(ptr as *mut Box<dyn FnOnce() + Send>) };
+    log_str("entry_point: got boxed");
     let closure = *boxed;
+    log_str("entry_point: got closure, about to call");
     closure();
+    log_str("entry_point: closure complete");
 }
 
 /// A thread local storage key which owns its contents.

@@ -128,6 +128,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     async fn test_spawn_and_join_async() {
+        console_error_panic_hook::set_once();
         let handle = spawn(|| 42);
         let result = handle.join_async().await.unwrap();
         assert_eq!(result, 42);
