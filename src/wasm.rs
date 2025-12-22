@@ -4,7 +4,11 @@ use std::fmt;
 use std::io;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
+
+static THREAD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -85,7 +89,7 @@ function makeNodeWorkerScript(shimUrl, entryName) {
   `;
 }
 
-export function wasm_safe_thread_spawn_worker(work, module, memory) {
+export function wasm_safe_thread_spawn_worker(work, module, memory, name) {
   const shimUrl = getShimUrl();
   const entryName = "wasm_safe_thread_entry_point";
 
@@ -94,7 +98,7 @@ export function wasm_safe_thread_spawn_worker(work, module, memory) {
     const src = makeBrowserWorkerScript(shimUrl, entryName);
     const blob = new Blob([src], { type: "text/javascript" });
     const blobUrl = URL.createObjectURL(blob);
-    const w = new Worker(blobUrl, { type: "module" });
+    const w = new Worker(blobUrl, { type: "module", name });
     URL.revokeObjectURL(blobUrl);
     w.postMessage([module, memory, work]);
 
@@ -110,7 +114,7 @@ export function wasm_safe_thread_spawn_worker(work, module, memory) {
     const ready = (async () => {
       const { Worker } = await import("node:worker_threads");
       const src = makeNodeWorkerScript(shimUrl, entryName);
-      const w = new Worker(src, { eval: true, type: "module" });
+      const w = new Worker(src, { eval: true, type: "module", name });
       w.postMessage([module, memory, work]);
       return w;
     })();
@@ -127,7 +131,7 @@ export function wasm_safe_thread_spawn_worker(work, module, memory) {
 "#
 )]
 extern "C" {
-    fn wasm_safe_thread_spawn_worker(work: JsValue, module: JsValue, memory: JsValue) -> WorkerLike;
+    fn wasm_safe_thread_spawn_worker(work: JsValue, module: JsValue, memory: JsValue, name: &str) -> WorkerLike;
 
     type WorkerLike;
 
@@ -167,8 +171,8 @@ impl WorkerHandle {
     }
 }
 
-pub fn spawn_with_shared_module(work: JsValue, mut on_msg: impl FnMut(JsValue) + 'static) -> WorkerHandle {
-    let worker = wasm_safe_thread_spawn_worker(work, wasm_bindgen::module(), wasm_bindgen::memory());
+pub fn spawn_with_shared_module(work: JsValue, name: &str, mut on_msg: impl FnMut(JsValue) + 'static) -> WorkerHandle {
+    let worker = wasm_safe_thread_spawn_worker(work, wasm_bindgen::module(), wasm_bindgen::memory(), name);
 
     let cb = Closure::wrap(Box::new(move |data: JsValue| {
         on_msg(data);
@@ -250,6 +254,7 @@ impl std::error::Error for AccessError {}
 /// A handle to a thread.
 pub struct JoinHandle<T> {
     receiver: wasm_safe_mutex::mpsc::Receiver<T>,
+    thread: Thread,
 }
 
 impl<T> JoinHandle<T> {
@@ -267,7 +272,7 @@ impl<T> JoinHandle<T> {
     }
 
     pub fn thread(&self) -> &Thread {
-        todo!("wasm JoinHandle::thread")
+        &self.thread
     }
 
     pub fn is_finished(&self) -> bool {
@@ -277,7 +282,11 @@ impl<T> JoinHandle<T> {
 
 #[derive(Clone)]
 pub struct Thread {
-    _private: (),
+    inner: Arc<ThreadInner>,
+}
+
+struct ThreadInner {
+    name: Option<String>,
 }
 
 impl Thread {
@@ -286,7 +295,7 @@ impl Thread {
     }
 
     pub fn name(&self) -> Option<&str> {
-        todo!("wasm Thread::name")
+        self.inner.name.as_deref()
     }
 
     pub fn unpark(&self) {
@@ -330,12 +339,42 @@ impl Builder {
         self
     }
 
-    pub fn spawn<F, T>(self, _f: F) -> io::Result<JoinHandle<T>>
+    pub fn spawn<F, T>(self, f: F) -> io::Result<JoinHandle<T>>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        todo!("wasm Builder::spawn")
+        // Worker name: use explicit name or generate a default for JS devtools
+        let worker_name = self._name.clone().unwrap_or_else(|| {
+            let id = THREAD_COUNTER.fetch_add(1, Ordering::Relaxed);
+            format!("wasm_safe_thread {}", id)
+        });
+
+        let (send, recv) = wasm_safe_mutex::mpsc::channel();
+        let closure = move || {
+            let result = f();
+            send.send_sync(result).unwrap();
+        };
+
+        // Double-box to get a thin pointer (Box<dyn FnOnce()> is a fat pointer)
+        let boxed: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(closure));
+        let ptr = Box::into_raw(boxed) as *mut () as usize;
+        let work: JsValue = (ptr as f64).into();
+
+        // The on_msg callback isn't used yet; Worker closes itself after running entrypoint.
+        spawn_with_shared_module(work, &worker_name, |_| {
+            log_str("on message");
+        });
+
+        // Thread::name() only returns Some if explicitly set via Builder::name()
+        let thread = Thread {
+            inner: Arc::new(ThreadInner { name: self._name }),
+        };
+
+        Ok(JoinHandle {
+            receiver: recv,
+            thread,
+        })
     }
 }
 
@@ -350,23 +389,7 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    let (send, recv) = wasm_safe_mutex::mpsc::channel();
-    let closure = move || {
-        let result = f();
-        send.send_sync(result).unwrap();
-    };
-
-    // Double-box to get a thin pointer (Box<dyn FnOnce()> is a fat pointer)
-    let boxed: Box<Box<dyn FnOnce() + Send>> = Box::new(Box::new(closure));
-    let ptr = Box::into_raw(boxed) as *mut () as usize;
-    let work: JsValue = (ptr as f64).into();
-
-    // The on_msg callback isn't used yet; Worker closes itself after running entrypoint.
-    spawn_with_shared_module(work, |_| {
-        log_str("on message");
-    });
-
-    JoinHandle { receiver: recv }
+    Builder::new().spawn(f).expect("failed to spawn thread")
 }
 
 pub fn current() -> Thread {
