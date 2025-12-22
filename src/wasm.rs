@@ -353,7 +353,8 @@ impl Builder {
         let (send, recv) = wasm_safe_mutex::mpsc::channel();
         let closure = move || {
             let result = f();
-            send.send_sync(result).unwrap();
+            // Ignore send errors - receiver may have been dropped if JoinHandle wasn't joined
+            let _ = send.send_sync(result);
         };
 
         // Double-box to get a thin pointer (Box<dyn FnOnce()> is a fat pointer)
