@@ -14,8 +14,8 @@ console_error_panic_hook = "0.1.7"
 
 [patch.crates-io]
 # for iter_custom_future testing, logs
-wasm-bindgen = {path = "../wasm-bindgen-drew"}
-wasm-bindgen-test = {path = "../wasm-bindgen-drew/crates/test"}
-wasm-bindgen-futures = {path = "../wasm-bindgen-drew/crates/futures"}
-js-sys = {path = "../wasm-bindgen-drew/crates/js-sys"}
-web-sys = {path = "../wasm-bindgen-drew/crates/web-sys"}
+wasm-bindgen = {path = "reference/wasm-bindgen-drew"}
+wasm-bindgen-test = {path = "reference/wasm-bindgen-drew/crates/test"}
+wasm-bindgen-futures = {path = "reference/wasm-bindgen-drew/crates/futures"}
+js-sys = {path = "reference/wasm-bindgen-drew/crates/js-sys"}
+web-sys = {path = "reference/wasm-bindgen-drew/crates/web-sys"}

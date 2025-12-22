@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 echo "======default======"
 ./scripts/wasm32/tests
 echo "======node experimental======"

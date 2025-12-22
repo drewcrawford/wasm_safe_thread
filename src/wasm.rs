@@ -13,252 +13,89 @@ use wasm_bindgen::JsCast;
     inline_js = r#"
 const SELF_URL = import.meta.url;
 
-function stripLineCol(s) {
-  return s.replace(/:\d+:\d+$/, "").replace(/[)\s]+$/, "");
-}
-
-function urlsFromStack(stack) {
-  const out = [];
-  for (const line of (stack || "").split(/\r?\n/)) {
-    // Firefox/Safari: "name@URL:line:col" or "@URL:line:col"
-    let m = line.match(/@(\S+):\d+:\d+/);
-    if (m && m[1]) out.push(stripLineCol(m[1]));
-
-    // Chrome/Node ESM: "(URL:line:col)"
-    m = line.match(/\((\S+):\d+:\d+\)/);
-    if (m && m[1]) out.push(stripLineCol(m[1]));
-
-    // Node sometimes: "at file:///...:line:col" (no parens)
-    m = line.match(/\s(file:\/\/\/\S+):\d+:\d+$/);
-    if (m && m[1]) out.push(stripLineCol(m[1]));
-
-    // Node CJS sometimes: "at /abs/path/file.js:line:col"
-    m = line.match(/\s(\/\S+):\d+:\d+$/);
-    if (m && m[1]) out.push(stripLineCol(m[1]));
-  }
-  return out;
-}
-
 function isNode() {
   return typeof process !== "undefined" && process.versions && process.versions.node;
 }
 
-function deriveHarnessFromSelfUrl(selfUrl) {
-  // Works for:
-  //   file:///.../snippets/<crate-hash>/inline0.js  -> file:///.../wasm-bindgen-test.js
-  //   http://.../snippets/<crate-hash>/inline0.js   -> http://.../wasm-bindgen-test
-  const idx = selfUrl.indexOf("/snippets/");
-  if (idx === -1) return "";
-
-  const base = selfUrl.slice(0, idx);
-  return isNode()
-    ? base + "/wasm-bindgen-test.js"
-    : base + "/wasm-bindgen-test";
-}
-
-function discoverShimUrl() {
-  const stack = (new Error()).stack || "";
-  const urls = urlsFromStack(stack);
-
-  // 1) Prefer the harness if it appears anywhere in the stack
-  for (const u of urls) {
-    if (u.includes("wasm-bindgen-test")) return u;
+// Derive the main wasm-bindgen shim URL from our snippet's URL.
+// Our inline0.js is at .../snippets/<crate-hash>/inline0.js
+// The main shim is at .../wasm-bindgen-test (browser) or .../wasm-bindgen-test.js (Node)
+function getShimUrl() {
+  const idx = SELF_URL.indexOf("/snippets/");
+  if (idx === -1) {
+    throw new Error("Cannot derive shim URL: SELF_URL doesn't contain /snippets/: " + SELF_URL);
   }
-
-  // 2) Derive harness from our own snippet location (works for both Node and browser)
-  // Our inline0.js is at .../snippets/<crate-hash>/inline0.js
-  // The main shim is at .../wasm-bindgen-test (browser) or .../wasm-bindgen-test.js (Node)
-  const derived = deriveHarnessFromSelfUrl(SELF_URL);
-  if (derived) return derived;
-
-  // 3) Skip self (so we don't pick inline0.js), prefer non-snippet URL
-  const filtered = urls.filter(u => u && u !== SELF_URL);
-  for (const u of filtered) {
-    if ((u.startsWith("http://") || u.startsWith("https://") || u.startsWith("file://")) && !u.includes("/snippets/")) return u;
-  }
-
-  // 4) Last resort: something (even self) so we fail later with good debug
-  return filtered[0] || SELF_URL || "";
+  const base = SELF_URL.slice(0, idx);
+  return isNode() ? base + "/wasm-bindgen-test.js" : base + "/wasm-bindgen-test";
 }
 
-// --- Worker script generation ---
-//
-// CRITICAL: For your "pass a raw pointer into shared wasm memory" approach to work,
-// the worker MUST be initialized with the exact (module, memory) pair passed from the parent.
-// Therefore we do NOT treat init as optional here. If we can't find a compatible init, we throw.
-
-function makeCommonHelperScript(entryName) {
+// Browser worker script - uses Web Worker API
+function makeBrowserWorkerScript(shimUrl, entryName) {
   return `
-    function pickInitStrict(m) {
-      // wasm-bindgen-test: named initSync export (takes module, memory directly)
-      if (m && typeof m.initSync === "function") return m.initSync;
-
-      // wasm-bindgen-test (sometimes): named __wbg_init
-      if (m && typeof m.__wbg_init === "function") return m.__wbg_init;
-
-      // wasm-pack/web style: default export is init
-      if (m && typeof m.default === "function") return m.default;
-
-      // Node ESM importing a CJS harness: namespace.default is module.exports object
-      if (m && m.default && typeof m.default.initSync === "function") return m.default.initSync;
-      if (m && m.default && typeof m.default.__wbg_init === "function") return m.default.__wbg_init;
-      if (m && m.default && typeof m.default.default === "function") return m.default.default;
-      if (m && m.default && typeof m.default === "function") return m.default;
-
-      // Older global-style
-      if (m && typeof m.wasm_bindgen === "function") return m.wasm_bindgen;
-      if (m && m.default && typeof m.default.wasm_bindgen === "function") return m.default.wasm_bindgen;
-
-      return null;
-    }
-
-    function pickEntry(m, name) {
-      if (m && typeof m[name] === "function") return m[name];
-      if (m && m.default && typeof m.default[name] === "function") return m.default[name];
-      return null;
-    }
-
-    async function loadShim(spec) {
-      const m = await import(spec);
-
-      const init = pickInitStrict(m);
-      const entry = pickEntry(m, ${JSON.stringify(entryName)});
-
-      const keys = m ? Object.keys(m) : [];
-      const defKeys = (m && m.default && (typeof m.default === "object" || typeof m.default === "function"))
-        ? Object.keys(m.default)
-        : [];
-
-      if (!entry) {
-        throw new Error(
-          "Missing entrypoint ${entryName} in shim module. " +
-          "keys=" + JSON.stringify(keys) +
-          " defaultKeys=" + JSON.stringify(defKeys) +
-          " spec=" + spec
-        );
-      }
-
-      if (!init) {
-        // For THIS library, we require an init we can call with (module, memory),
-        // otherwise the raw-pointer scheme is not reliable.
-        throw new Error(
-          "Missing wasm-bindgen init function in shim module (need init(module, memory)). " +
-          "keys=" + JSON.stringify(keys) +
-          " defaultKeys=" + JSON.stringify(defKeys) +
-          " spec=" + spec
-        );
-      }
-
-      return { init, entry };
-    }
-  `;
-}
-
-function makeBrowserWorkerScript(spec, entryName) {
-  const helpers = makeCommonHelperScript(entryName);
-  return `
-    ${helpers}
-
-    let cached;
-    async function get() { return cached || (cached = loadShim(${JSON.stringify(spec)})); }
-
-    self.onmessage = (e) => {
-      (async () => {
+    self.onmessage = async (e) => {
+      try {
         const [module, memory, work] = e.data;
-        const { init, entry } = await get();
+        const shim = await import(${JSON.stringify(shimUrl)});
 
-        // STRICT: do not swallow errors; we need shared (module, memory) to be wired up.
-        await init(module, memory);
+        // initSync is always available (we patched wasm-bindgen to generate it)
+        await shim.initSync({ module, memory });
 
-        entry(work);
+        // Call the entry point
+        shim[${JSON.stringify(entryName)}](work);
         close();
-      })().catch(err => {
-        console.log(err);
-        setTimeout(() => { throw err; });
+      } catch (err) {
+        console.error(err);
         throw err;
-      });
+      }
     };
   `;
 }
 
-function makeNodeWorkerScript(spec, entryName) {
-  // Worker script for Node.js (works with both ESM and CJS shims)
-  //
-  // For ESM: the main shim has initSync and exports from _bg.js
-  // For CJS: the main shim has initSync and all exports in one file
-  //
-  // CRITICAL: In Node.js, modules are cached and shared between main thread
-  // and worker threads. We bust the cache by adding a unique query param.
-  // This ensures each worker gets its own module state.
+// Node worker script - uses worker_threads API with cache-busting
+function makeNodeWorkerScript(shimUrl, entryName) {
   return `
     import { parentPort, threadId } from "node:worker_threads";
 
-    const SHIM_URL = ${JSON.stringify(spec)};
-    // Cache-busting query param ensures each worker gets fresh module state
-    const WORKER_SHIM_URL = SHIM_URL + '?worker=' + threadId;
+    // Cache-bust to get fresh module state per worker
+    const url = ${JSON.stringify(shimUrl)} + '?worker=' + threadId;
 
-    let shimPromise = null;
-    async function getShim() {
-      if (!shimPromise) {
-        shimPromise = import(WORKER_SHIM_URL);
-      }
-      return shimPromise;
-    }
+    parentPort.on("message", async (msg) => {
+      try {
+        const [module, memory, work] = msg;
+        const shim = await import(url);
 
-    parentPort.on("message", (msg) => {
-      (async () => {
-        const [wasmModule, sharedMemory, work] = msg;
-        const shim = await getShim();
+        // initSync is on shim directly (ESM) or shim.default (CJS)
+        const initSync = shim.initSync || shim.default?.initSync;
+        if (!initSync) throw new Error("No initSync found");
 
-        // Both ESM and CJS shims now export initSync
-        // For CJS, the exports are on shim.default
-        const initSync = shim.initSync || (shim.default && shim.default.initSync);
-        if (typeof initSync !== "function") {
-          const keys = Object.keys(shim);
-          const defKeys = shim.default ? Object.keys(shim.default) : [];
-          throw new Error("Missing initSync in shim. keys=" + JSON.stringify(keys) + " defaultKeys=" + JSON.stringify(defKeys));
-        }
+        // thread_stack_size tells runtime this is a worker thread
+        initSync({ module, memory, thread_stack_size: 1048576 });
 
-        // Initialize with the shared module and memory
-        // thread_stack_size tells the runtime this is a worker thread
-        const WORKER_STACK_SIZE = 1048576; // 1MB stack for worker
-        initSync({
-          module: wasmModule,
-          memory: sharedMemory,
-          thread_stack_size: WORKER_STACK_SIZE
-        });
+        // Entry point is on shim directly (ESM) or shim.default (CJS)
+        const entry = shim[${JSON.stringify(entryName)}] || shim.default?.[${JSON.stringify(entryName)}];
+        if (!entry) throw new Error("No entry point found: " + ${JSON.stringify(entryName)});
 
-        // Get entry point function
-        const entry = shim[${JSON.stringify(entryName)}] || (shim.default && shim.default[${JSON.stringify(entryName)}]);
-        if (typeof entry !== "function") {
-          throw new Error("Missing entry point: " + ${JSON.stringify(entryName)} + " in shim");
-        }
-
-        // Run the entry point
-        console.log("Worker: About to call entry point with work =", work);
         entry(work);
-        console.log("Worker: Entry point returned");
         parentPort.close();
-      })().catch(err => {
-        console.log(err);
-        setTimeout(() => { throw err; });
+      } catch (err) {
+        console.error(err);
         throw err;
-      });
+      }
     });
   `;
 }
 
-function spawnWorkerUniversal(shimUrl, module, memory, work, entryName) {
-  // Browser path
-  if (typeof globalThis.Worker === "function") {
-    const spec = shimUrl; // "/wasm-bindgen-test" or "http://..." is valid in browser
-    const src = makeBrowserWorkerScript(spec, entryName);
+export function wasm_safe_thread_spawn_worker(work, module, memory) {
+  const shimUrl = getShimUrl();
+  const entryName = "wasm_safe_thread_entry_point";
 
+  // Browser: use Web Worker API
+  if (typeof Worker === "function" && !isNode()) {
+    const src = makeBrowserWorkerScript(shimUrl, entryName);
     const blob = new Blob([src], { type: "text/javascript" });
-    const url = URL.createObjectURL(blob);
-    const w = new Worker(url, { type: "module" });
-    URL.revokeObjectURL(url);
-
+    const blobUrl = URL.createObjectURL(blob);
+    const w = new Worker(blobUrl, { type: "module" });
+    URL.revokeObjectURL(blobUrl);
     w.postMessage([module, memory, work]);
 
     return {
@@ -268,41 +105,24 @@ function spawnWorkerUniversal(shimUrl, module, memory, work, entryName) {
     };
   }
 
-  // Node path (NO require; queue until imports resolve)
+  // Node: use worker_threads
   if (isNode()) {
-    let ready = (async () => {
+    const ready = (async () => {
       const { Worker } = await import("node:worker_threads");
-      const { pathToFileURL } = await import("node:url");
-
-      const spec = (/^(https?:|file:|data:|blob:)/.test(shimUrl))
-        ? shimUrl
-        : pathToFileURL(shimUrl).href;
-
-      const src = makeNodeWorkerScript(spec, entryName);
+      const src = makeNodeWorkerScript(shimUrl, entryName);
       const w = new Worker(src, { eval: true, type: "module" });
-
       w.postMessage([module, memory, work]);
       return w;
     })();
 
     return {
-      postMessage: (msg) => { ready.then(w => w.postMessage(msg)); },
-      terminate: () => { ready.then(w => w.terminate()); },
-      setOnMessage: (cb) => {
-        ready.then(w => w.on("message", (data) => cb(data)));
-      },
+      postMessage: (msg) => ready.then(w => w.postMessage(msg)),
+      terminate: () => ready.then(w => w.terminate()),
+      setOnMessage: (cb) => ready.then(w => w.on("message", cb)),
     };
   }
 
-  throw new Error("No Worker (browser) or worker_threads (Node) available");
-}
-
-export function wasm_safe_thread_spawn_worker(work, module, memory) {
-  const shim = discoverShimUrl();
-  if (!shim) throw new Error("Could not discover shim URL via stack trace");
-
-  const entryName = "wasm_safe_thread_entry_point";
-  return spawnWorkerUniversal(shim, module, memory, work, entryName);
+  throw new Error("No Worker API available");
 }
 "#
 )]
