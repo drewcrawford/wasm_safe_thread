@@ -200,11 +200,38 @@ export function atomics_wait_timeout_ms_try(timeout_ms) {
     return "unsupported";
   }
 }
+
+export function sleep_sync_ms(ms) {
+  if (ms <= 0) return;
+
+  try {
+    // SharedArrayBuffer may be unavailable unless crossOriginIsolated (in browsers)
+    const sab = new SharedArrayBuffer(4);
+    const i32 = new Int32Array(sab);
+    // Wait while i32[0] is 0, with a timeout (ms). Returns "timed-out" typically.
+    Atomics.wait(i32, 0, 0, ms);
+    return;
+  } catch {
+    // Fall through to the worst-case synchronous fallback below.
+  }
+
+  // Worst-case fallback: busy-wait (CPU burn). Still fully synchronous.
+  const end = (typeof performance !== "undefined" && performance.now)
+    ? performance.now() + ms
+    : Date.now() + ms;
+
+  if (typeof performance !== "undefined" && performance.now) {
+    while (performance.now() < end) {}
+  } else {
+    while (Date.now() < end) {}
+  }
+}
 "#
 )]
 extern "C" {
     fn is_main_thread() -> bool;
     fn atomics_wait_timeout_ms_try(timeout_ms: f64) -> JsValue;
+    fn sleep_sync_ms(ms: f64);
 }
 
 
@@ -513,8 +540,8 @@ pub fn current() -> Thread {
     })
 }
 
-pub fn sleep(_dur: Duration) {
-    todo!("wasm sleep")
+pub fn sleep(dur: Duration) {
+    sleep_sync_ms(dur.as_millis() as f64);
 }
 
 pub fn yield_now() {

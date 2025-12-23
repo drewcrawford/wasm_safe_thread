@@ -231,8 +231,37 @@ mod tests {
 
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn test_sleep() {
-        sleep(Duration::from_millis(1));
+        #[cfg(not(target_arch = "wasm32"))]
+        use std::time::Instant;
+        #[cfg(target_arch = "wasm32")]
+        use web_time::Instant;
+
+        let start = Instant::now();
+        sleep(Duration::from_millis(50));
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(50), "sleep should wait at least 50ms, but only waited {:?}", elapsed);
+    }
+
+    crate::async_test! {
+        async fn sleep_bg() {
+            #[cfg(not(target_arch = "wasm32"))]
+            use std::time::Instant;
+            #[cfg(target_arch = "wasm32")]
+            use web_time::Instant;
+
+            let start = Instant::now();
+            let bg = Builder::new()
+                .name("sleeping".to_string())
+                .spawn(|| {
+                    sleep(Duration::from_millis(50));
+                })
+                .unwrap();
+            bg.join_async().await.unwrap();
+            let elapsed = start.elapsed();
+            assert!(elapsed >= Duration::from_millis(50), "sleep should wait at least 50ms, but only waited {:?}", elapsed);
+        }
     }
 
     #[test]
