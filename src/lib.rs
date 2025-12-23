@@ -265,9 +265,9 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn test_available_parallelism() {
         let parallelism = available_parallelism().unwrap();
-        println!("available_parallelism: {}", parallelism);
         assert!(parallelism.get() >= 1);
     }
 

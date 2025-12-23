@@ -226,12 +226,44 @@ export function sleep_sync_ms(ms) {
     while (Date.now() < end) {}
   }
 }
+
+// Returns the number of logical processors available, or 1 if unknown.
+export function get_available_parallelism() {
+  // Browser: navigator.hardwareConcurrency
+  if (typeof navigator !== "undefined" && navigator.hardwareConcurrency) {
+    return navigator.hardwareConcurrency;
+  }
+
+  // Node.js: try os.availableParallelism() (Node 19.4+) or os.cpus().length
+  if (typeof process !== "undefined" && process.versions && process.versions.node) {
+    try {
+      const os = process.getBuiltinModule?.("node:os");
+      if (os) {
+        // Node 19.4+ has availableParallelism()
+        if (typeof os.availableParallelism === "function") {
+          return os.availableParallelism();
+        }
+        // Fallback to cpus().length
+        const cpus = os.cpus?.();
+        if (cpus && cpus.length > 0) {
+          return cpus.length;
+        }
+      }
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  // Unknown environment
+  return 1;
+}
 "#
 )]
 extern "C" {
     fn is_main_thread() -> bool;
     fn atomics_wait_timeout_ms_try(timeout_ms: f64) -> JsValue;
     fn sleep_sync_ms(ms: f64);
+    fn get_available_parallelism() -> u32;
 }
 
 
@@ -557,7 +589,10 @@ pub fn park_timeout(_dur: Duration) {
 }
 
 pub fn available_parallelism() -> io::Result<NonZeroUsize> {
-    todo!("wasm available_parallelism")
+    let count = get_available_parallelism();
+    NonZeroUsize::new(count as usize).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "could not determine available parallelism")
+    })
 }
 
 
