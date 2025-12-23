@@ -9,6 +9,10 @@ use std::time::Duration;
 
 static THREAD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+std::thread_local! {
+    static CURRENT_THREAD: std::cell::RefCell<Option<Thread>> = const { std::cell::RefCell::new(None) };
+}
+
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
@@ -417,8 +421,20 @@ impl Builder {
             format!("wasm_safe_thread {}", id)
         });
 
+        // Create Thread before spawning so we can pass it to the worker
+        // Thread::name() only returns Some if explicitly set via Builder::name()
+        let thread = Thread {
+            inner: Arc::new(ThreadInner { name: self._name }),
+        };
+        let thread_for_worker = thread.clone();
+
         let (send, recv) = wasm_safe_mutex::mpsc::channel();
         let closure = move || {
+            // Set up TLS for current() before running user code
+            CURRENT_THREAD.with(|cell| {
+                *cell.borrow_mut() = Some(thread_for_worker);
+            });
+
             let result = f();
             // Ignore send errors - receiver may have been dropped if JoinHandle wasn't joined
             let _ = send.send_sync(result);
@@ -436,11 +452,6 @@ impl Builder {
         spawn_with_shared_module(work, &worker_name, shim_name, |_| {
             log_str("on message");
         });
-
-        // Thread::name() only returns Some if explicitly set via Builder::name()
-        let thread = Thread {
-            inner: Arc::new(ThreadInner { name: self._name }),
-        };
 
         Ok(JoinHandle {
             receiver: recv,
@@ -464,7 +475,25 @@ where
 }
 
 pub fn current() -> Thread {
-    todo!("wasm Current")
+    CURRENT_THREAD.with(|cell| {
+        let mut borrowed = cell.borrow_mut();
+        if let Some(ref thread) = *borrowed {
+            thread.clone()
+        } else {
+            // Lazily create a Thread for threads we didn't spawn
+            let name = if is_main_thread() {
+                Some("main".to_string())
+            } else {
+                // Thread not spawned by us (e.g., a Web Worker created externally)
+                None
+            };
+            let thread = Thread {
+                inner: Arc::new(ThreadInner { name }),
+            };
+            *borrowed = Some(thread.clone());
+            thread
+        }
+    })
 }
 
 pub fn sleep(_dur: Duration) {

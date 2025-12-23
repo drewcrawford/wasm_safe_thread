@@ -187,6 +187,36 @@ mod tests {
         let _current = current();
     }
 
+    // Test that current() returns correct thread info
+    crate::async_test! {
+        async fn test_current_in_spawned_thread() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::Arc;
+
+            // Main thread should have name "main"
+            let main_thread = current();
+            assert_eq!(main_thread.name(), Some("main"));
+
+            let saw_correct_name = Arc::new(AtomicBool::new(false));
+            let saw_correct_name_clone = saw_correct_name.clone();
+
+            let handle = Builder::new()
+                .name("test-worker".to_string())
+                .spawn(move || {
+                    let thread = current();
+                    if thread.name() == Some("test-worker") {
+                        saw_correct_name_clone.store(true, Ordering::SeqCst);
+                    }
+                })
+                .unwrap();
+
+            handle.join_async().await.unwrap();
+
+            assert!(saw_correct_name.load(Ordering::SeqCst),
+                "spawned thread should see its own name via current()");
+        }
+    }
+
     #[test]
     fn test_yield_now() {
         yield_now();
