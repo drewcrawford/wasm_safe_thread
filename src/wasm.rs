@@ -155,6 +155,41 @@ extern "C" {
     fn set_on_message(this: &WorkerLike, cb: &js_sys::Function);
 }
 
+#[wasm_bindgen(
+    inline_js = r#"
+export function is_main_thread() {
+
+const isNode =
+    typeof process !== "undefined" &&
+    process?.versions?.node != null &&
+    process?.release?.name === "node";
+
+  if (!isNode) {
+    // Browser main thread (classic window context)
+    if (typeof window !== "undefined" && typeof document !== "undefined") {
+      return true;
+    }
+    return false;
+  }
+
+  // Node: synchronous main-thread detection (ESM-safe)
+  if (process?.getBuiltinModule) {
+    const wt = process.getBuiltinModule("node:worker_threads");
+    if (wt && typeof wt.isMainThread === "boolean") {
+      return wt.isMainThread;
+    }
+  }
+
+  throw new Error("Can't detect");
+
+}
+"#
+)]
+extern "C" {
+    fn is_main_thread() -> bool;
+}
+
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console, js_name = log)]
@@ -269,6 +304,9 @@ pub struct JoinHandle<T> {
 
 impl<T> JoinHandle<T> {
     pub fn join(self) -> Result<T, Box<String>> {
+        if is_main_thread() {
+            return Err(Box::new("Can't join from the main thread on wasm32".to_string()))
+        }
         self.receiver
             .recv_sync()
             .map_err(|e| Box::new(format!("{:?}", e)) as Box<String>)
@@ -437,4 +475,13 @@ pub fn park_timeout(_dur: Duration) {
 
 pub fn available_parallelism() -> io::Result<NonZeroUsize> {
     todo!("wasm available_parallelism")
+}
+
+
+#[cfg(test)] mod tests {
+    #[wasm_bindgen_test::wasm_bindgen_test] fn is_main_thread() {
+        assert!(super::is_main_thread());
+    }
+
+
 }

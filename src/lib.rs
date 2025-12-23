@@ -1,5 +1,7 @@
 //! A library that provides std::thread-like API across wasm and std platforms.
 
+extern crate alloc;
+
 #[cfg(not(target_arch = "wasm32"))]
 mod stdlib;
 #[cfg(target_arch = "wasm32")]
@@ -121,19 +123,45 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(target_arch = "wasm32", should_panic)] //can't join from the main thread
     fn test_spawn_and_join() {
         let handle = spawn(|| 42);
         let result = handle.join().unwrap();
         assert_eq!(result, 42);
     }
 
-    //#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    // async fn test_spawn_and_join_async() {
-    //     console_error_panic_hook::set_once();
-    //     let handle = spawn(|| 42);
-    //     let result = handle.join_async().await.unwrap();
-    //     assert_eq!(result, 42);
-    // }
+    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    fn zzzpanic_hook() {
+        console_error_panic_hook::set_once();
+
+    }
+
+    // try join from bg thread
+        crate::async_test! {
+            async fn join_bg() {
+
+                let handle = Builder::new()
+                        .name("join me".to_string())
+                        .spawn(|| {})
+                        .unwrap();
+
+                let bg = Builder::new()
+                .name("joining".to_string())
+            .spawn(|| {
+                handle.join().unwrap();
+            }).unwrap();
+            bg.join_async().await.unwrap();
+            }
+        }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    async fn test_spawn_and_join_async() {
+        let handle = spawn(|| 42);
+        let result = handle.join_async().await.unwrap();
+        assert_eq!(result, 42);
+    }
 
 
     #[test]
@@ -258,8 +286,6 @@ mod tests {
 
     crate::async_test! {
         async fn closure_bomb() {
-        #[cfg(target_arch = "wasm32")]
-        console_error_panic_hook::set_once();
         Builder::new()
             .name("closure bomb".to_string())
             .spawn(|| {
@@ -279,8 +305,6 @@ mod tests {
 
     crate::async_test! {
         async fn single_spawn() {
-            #[cfg(target_arch = "wasm32")]
-            console_error_panic_hook::set_once();
             let handle = Builder::new()
                 .name("single worker".to_string())
                 .spawn(|| {
@@ -293,8 +317,6 @@ mod tests {
 
     crate::async_test! {
         async fn flat_spawn_parallel() {
-            #[cfg(target_arch="wasm32")]
-            console_error_panic_hook::set_once();
             for i in 0..12 {
                 Builder::new()
                     .name(format!("parallel worker {}", i))
