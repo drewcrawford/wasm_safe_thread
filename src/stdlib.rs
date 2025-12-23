@@ -64,6 +64,16 @@ impl<T> JoinHandle<T> {
         self.0.join()
     }
 
+    pub async fn join_async(self) -> Result<T, Box<String>> where T: Send + 'static {
+        let (c,s) = r#continue::continuation();
+        std::thread::Builder::new()
+            .name("wasm_safe_thread::join_async".to_string())
+            .spawn(move || {
+                let output = self.join().map_err(|e| Box::new(format!("{:?}", e)) as Box<String>);
+                c.send(output);
+            });
+        s.await
+    }
     /// Gets the thread associated with this handle.
     pub fn thread(&self) -> &Thread {
         // We need to wrap the thread reference, but since Thread wraps std::thread::Thread

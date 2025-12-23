@@ -4,6 +4,7 @@
 mod stdlib;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
+mod test_executor;
 
 #[cfg(not(target_arch = "wasm32"))]
 use stdlib as backend;
@@ -255,8 +256,9 @@ mod tests {
         );
     }
 
-    #[cfg_attr(target_arch="wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    async fn closure_bomb() {
+    crate::async_test! {
+        async fn closure_bomb() {
+        #[cfg(target_arch = "wasm32")]
         console_error_panic_hook::set_once();
         Builder::new()
             .name("closure bomb".to_string())
@@ -272,28 +274,34 @@ mod tests {
                 }
             })
             .unwrap();
-    }
-
-    #[cfg_attr(target_arch="wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    async fn single_spawn() {
-        console_error_panic_hook::set_once();
-        let handle = Builder::new()
-            .name("single worker".to_string())
-            .spawn(|| {
-                // Do nothing
-            })
-            .unwrap();
-        handle.join_async().await.unwrap();
-    }
-
-    #[cfg_attr(target_arch="wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    async fn flat_spawn_parallel() {
-        console_error_panic_hook::set_once();
-        for i in 0..12 {
-            Builder::new()
-                .name(format!("parallel worker {}", i))
-                .spawn(|| {})
-                .unwrap();
         }
     }
+
+    crate::async_test! {
+        async fn single_spawn() {
+            #[cfg(target_arch = "wasm32")]
+            console_error_panic_hook::set_once();
+            let handle = Builder::new()
+                .name("single worker".to_string())
+                .spawn(|| {
+                    // Do nothing
+                })
+                .unwrap();
+            handle.join_async().await.unwrap();
+        }
+    }
+
+    crate::async_test! {
+        async fn flat_spawn_parallel() {
+            #[cfg(target_arch="wasm32")]
+            console_error_panic_hook::set_once();
+            for i in 0..12 {
+                Builder::new()
+                    .name(format!("parallel worker {}", i))
+                    .spawn(|| {})
+                    .unwrap();
+            }
+        }
+    }
+
 }
