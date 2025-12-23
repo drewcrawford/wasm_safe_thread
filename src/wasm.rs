@@ -23,14 +23,14 @@ function isNode() {
 
 // Derive the main wasm-bindgen shim URL from our snippet's URL.
 // Our inline0.js is at .../snippets/<crate-hash>/inline0.js
-// The main shim is at .../wasm-bindgen-test (browser) or .../wasm-bindgen-test.js (Node)
-function getShimUrl() {
+// The main shim is at .../<binary-name>.js
+function getShimUrl(shimName) {
   const idx = SELF_URL.indexOf("/snippets/");
   if (idx === -1) {
     throw new Error("Cannot derive shim URL: SELF_URL doesn't contain /snippets/: " + SELF_URL);
   }
   const base = SELF_URL.slice(0, idx);
-  return isNode() ? base + "/wasm-bindgen-test.js" : base + "/wasm-bindgen-test";
+  return base + "/" + shimName + ".js";
 }
 
 // Browser worker script - uses Web Worker API
@@ -39,10 +39,19 @@ function makeBrowserWorkerScript(shimUrl, entryName) {
     self.onmessage = async (e) => {
       try {
         const [module, memory, work] = e.data;
-        const shim = await import(${JSON.stringify(shimUrl)});
+        console.log("Worker received:", { module, memory, work });
+        console.log("Memory buffer:", memory.buffer);
+        console.log("Memory buffer byteLength:", memory.buffer.byteLength);
+        console.log("Is SharedArrayBuffer:", memory.buffer instanceof SharedArrayBuffer);
 
-        // initSync is always available (we patched wasm-bindgen to generate it)
-        await shim.initSync({ module, memory });
+        // Cache-bust to get fresh module state per worker (needed for Safari)
+        const url = ${JSON.stringify(shimUrl)} + '?worker=' + Math.random();
+        const shim = await import(url);
+        console.log("Shim loaded, calling initSync");
+
+        // Use initSync with module and memory from main thread
+        shim.initSync({ module, memory, thread_stack_size: 1048576 });
+        console.log("initSync complete");
 
         // Call the entry point
         shim[${JSON.stringify(entryName)}](work);
@@ -89,8 +98,9 @@ function makeNodeWorkerScript(shimUrl, entryName) {
   `;
 }
 
-export function wasm_safe_thread_spawn_worker(work, module, memory, name) {
-  const shimUrl = getShimUrl();
+export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimName) {
+  const shimUrl = getShimUrl(shimName);
+  console.log("Shim URL:", shimUrl);
   const entryName = "wasm_safe_thread_entry_point";
 
   // Browser: use Web Worker API
@@ -131,7 +141,7 @@ export function wasm_safe_thread_spawn_worker(work, module, memory, name) {
 "#
 )]
 extern "C" {
-    fn wasm_safe_thread_spawn_worker(work: JsValue, module: JsValue, memory: JsValue, name: &str) -> WorkerLike;
+    fn wasm_safe_thread_spawn_worker(work: JsValue, module: JsValue, memory: JsValue, name: &str, shim_name: &str) -> WorkerLike;
 
     type WorkerLike;
 
@@ -171,8 +181,8 @@ impl WorkerHandle {
     }
 }
 
-pub fn spawn_with_shared_module(work: JsValue, name: &str, mut on_msg: impl FnMut(JsValue) + 'static) -> WorkerHandle {
-    let worker = wasm_safe_thread_spawn_worker(work, wasm_bindgen::module(), wasm_bindgen::memory(), name);
+pub fn spawn_with_shared_module(work: JsValue, name: &str, shim_name: &str, mut on_msg: impl FnMut(JsValue) + 'static) -> WorkerHandle {
+    let worker = wasm_safe_thread_spawn_worker(work, wasm_bindgen::module(), wasm_bindgen::memory(), name, shim_name);
 
     let cb = Closure::wrap(Box::new(move |data: JsValue| {
         on_msg(data);
@@ -310,6 +320,7 @@ pub struct Builder {
     _name: Option<String>,
     _stack_size: Option<usize>,
     _spawn_hooks: Vec<Box<dyn FnOnce() + Send + 'static>>,
+    _shim_name: Option<String>,
 }
 
 impl Builder {
@@ -318,7 +329,15 @@ impl Builder {
             _name: None,
             _stack_size: None,
             _spawn_hooks: Vec::new(),
+            _shim_name: None,
         }
+    }
+
+    /// Set the wasm-bindgen shim name for worker spawning.
+    /// This should match the binary/example name (e.g., "single_spawn", "wasm-bindgen-test").
+    pub fn shim_name(mut self, name: String) -> Self {
+        self._shim_name = Some(name);
+        self
     }
 
     pub fn name(mut self, name: String) -> Self {
@@ -362,8 +381,11 @@ impl Builder {
         let ptr = Box::into_raw(boxed) as *mut () as usize;
         let work: JsValue = (ptr as f64).into();
 
+        // Default shim name to "wasm-bindgen-test" for tests - override with Builder::shim_name() for examples/binaries
+        let shim_name = self._shim_name.as_deref().unwrap_or("wasm-bindgen-test");
+
         // The on_msg callback isn't used yet; Worker closes itself after running entrypoint.
-        spawn_with_shared_module(work, &worker_name, |_| {
+        spawn_with_shared_module(work, &worker_name, shim_name, |_| {
             log_str("on message");
         });
 

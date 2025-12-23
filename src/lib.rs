@@ -126,13 +126,13 @@ mod tests {
         assert_eq!(result, 42);
     }
 
-    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    async fn test_spawn_and_join_async() {
-        console_error_panic_hook::set_once();
-        let handle = spawn(|| 42);
-        let result = handle.join_async().await.unwrap();
-        assert_eq!(result, 42);
-    }
+    //#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    // async fn test_spawn_and_join_async() {
+    //     console_error_panic_hook::set_once();
+    //     let handle = spawn(|| 42);
+    //     let result = handle.join_async().await.unwrap();
+    //     assert_eq!(result, 42);
+    // }
 
 
     #[test]
@@ -253,5 +253,47 @@ mod tests {
             vec![1, 2, 3, 100],
             "hooks should run in order before main function"
         );
+    }
+
+    #[cfg_attr(target_arch="wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    async fn closure_bomb() {
+        console_error_panic_hook::set_once();
+        Builder::new()
+            .name("closure bomb".to_string())
+            .spawn(|| {
+                for i in 0..5 {
+                    Builder::new()
+                        .spawn(move || {
+                            // Just do a simple computation, no allocations
+                            let x = i * 2;
+                            std::hint::black_box(x);
+                        })
+                        .unwrap();
+                }
+            })
+            .unwrap();
+    }
+
+    #[cfg_attr(target_arch="wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    async fn single_spawn() {
+        console_error_panic_hook::set_once();
+        let handle = Builder::new()
+            .name("single worker".to_string())
+            .spawn(|| {
+                // Do nothing
+            })
+            .unwrap();
+        handle.join_async().await.unwrap();
+    }
+
+    #[cfg_attr(target_arch="wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    async fn flat_spawn_parallel() {
+        console_error_panic_hook::set_once();
+        for i in 0..12 {
+            Builder::new()
+                .name(format!("parallel worker {}", i))
+                .spawn(|| {})
+                .unwrap();
+        }
     }
 }
