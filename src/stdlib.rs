@@ -3,8 +3,10 @@
 use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::thread;
 use std::time::Duration;
+use wasm_safe_mutex::mpsc;
 
 /// A thread local storage key which owns its contents.
 pub struct LocalKey<T: 'static> {
@@ -56,24 +58,26 @@ impl fmt::Display for AccessError {
 impl std::error::Error for AccessError {}
 
 /// A handle to a thread.
-pub struct JoinHandle<T>(thread::JoinHandle<T>);
+pub struct JoinHandle<T> {
+    std_handle: thread::JoinHandle<()>,
+    receiver: mpsc::Receiver<Result<T, Box<dyn std::any::Any + Send + 'static>>>,
+}
 
 impl<T> JoinHandle<T> {
     /// Waits for the thread to finish and returns its result.
     pub fn join(self) -> Result<T, Box<dyn std::any::Any + Send + 'static>> {
-        self.0.join()
+        // The thread always sends a result before exiting, so this should never fail
+        self.receiver.recv_sync().expect("thread terminated without sending result")
     }
 
     pub async fn join_async(self) -> Result<T, Box<String>> where T: Send + 'static {
-        let (c,s) = r#continue::continuation();
-        std::thread::Builder::new()
-            .name("wasm_safe_thread::join_async".to_string())
-            .spawn(move || {
-                let output = self.join().map_err(|e| Box::new(format!("{:?}", e)) as Box<String>);
-                c.send(output);
-            });
-        s.await
+        self.receiver
+            .recv_async()
+            .await
+            .expect("thread terminated without sending result")
+            .map_err(|e| Box::new(format!("{:?}", e)) as Box<String>)
     }
+
     /// Gets the thread associated with this handle.
     pub fn thread(&self) -> &Thread {
         // We need to wrap the thread reference, but since Thread wraps std::thread::Thread
@@ -84,7 +88,7 @@ impl<T> JoinHandle<T> {
 
     /// Checks if the thread has finished running.
     pub fn is_finished(&self) -> bool {
-        self.0.is_finished()
+        self.std_handle.is_finished()
     }
 }
 
@@ -158,14 +162,15 @@ impl Builder {
         T: Send + 'static,
     {
         let Builder { inner, spawn_hooks } = self;
-        inner
-            .spawn(move || {
-                for hook in spawn_hooks {
-                    hook();
-                }
-                f()
-            })
-            .map(JoinHandle)
+        let (sender, receiver) = mpsc::channel();
+        let std_handle = inner.spawn(move || {
+            for hook in spawn_hooks {
+                hook();
+            }
+            let result = catch_unwind(AssertUnwindSafe(f));
+            let _ = sender.send_sync(result);
+        })?;
+        Ok(JoinHandle { std_handle, receiver })
     }
 }
 
@@ -181,7 +186,12 @@ where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    JoinHandle(thread::spawn(f))
+    let (sender, receiver) = mpsc::channel();
+    let std_handle = thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(f));
+        let _ = sender.send_sync(result);
+    });
+    JoinHandle { std_handle, receiver }
 }
 
 /// Gets a handle to the thread that invokes it.
