@@ -272,6 +272,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn test_thread_local() {
         use std::cell::Cell;
 
@@ -290,6 +291,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn test_thread_local_try_with() {
         use std::cell::Cell;
 
