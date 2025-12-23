@@ -164,15 +164,17 @@ mod tests {
     }
 
 
-    #[test]
-    fn test_builder() {
-        let handle = Builder::new()
+    async_test! {
+        async fn test_builder() {
+            let handle = Builder::new()
             .name("test-thread".to_string())
             .spawn(|| "hello")
             .unwrap();
-        let result = handle.join().unwrap();
-        assert_eq!(result, "hello");
+            let result = handle.join_async().await.unwrap();
+            assert_eq!(result, "hello");
+        }
     }
+
 
     #[test]
     fn test_current_thread() {
