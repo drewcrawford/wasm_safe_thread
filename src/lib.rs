@@ -219,9 +219,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn test_yield_now() {
         yield_now();
     }
+
+    async_test! {
+        async fn test_yield_now_bg() {
+            crate::Builder::new()
+            .name("test-thread".to_string())
+            .spawn(|| {
+                yield_now();
+            }).unwrap().join_async().await.unwrap();
+        }
+    }
+
 
     #[test]
     fn test_sleep() {

@@ -186,11 +186,28 @@ const isNode =
   throw new Error("Can't detect");
 
 }
+
+let __yield_sab = new SharedArrayBuffer(4);
+let __yield_i32 = new Int32Array(__yield_sab);
+
+// Returns one of:
+//   "ok" | "not-equal" | "timed-out" | "unsupported"
+export function atomics_wait_timeout_ms_try(timeout_ms) {
+  try {
+    return Atomics.wait(__yield_i32, 0, 0, timeout_ms);
+  } catch (_e) {
+    // e.g. browser window main thread, or environments without SAB/Atomics.wait
+    return "unsupported";
+  }
+}
 "#
 )]
 extern "C" {
     fn is_main_thread() -> bool;
+    fn atomics_wait_timeout_ms_try(timeout_ms: f64) -> JsValue;
 }
+
+
 
 
 #[wasm_bindgen]
@@ -501,7 +518,7 @@ pub fn sleep(_dur: Duration) {
 }
 
 pub fn yield_now() {
-    todo!("wasm yield_now")
+    atomics_wait_timeout_ms_try(0.001);
 }
 
 pub fn park() {
