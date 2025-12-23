@@ -2,7 +2,6 @@
 
 use std::fmt;
 use std::io;
-use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -249,31 +248,44 @@ pub fn wasm_safe_thread_entry_point(work: JsValue) {
 }
 
 /// A thread local storage key which owns its contents.
+///
+/// This wraps `std::thread::LocalKey` which provides thread-local storage
+/// on WASM with atomics via the standard library's TLS implementation.
 pub struct LocalKey<T: 'static> {
-    _marker: PhantomData<T>,
+    inner: &'static std::thread::LocalKey<T>,
 }
 
 impl<T: 'static> LocalKey<T> {
     /// Creates a new `LocalKey`.
     #[doc(hidden)]
-    pub const fn new(_init: fn() -> T) -> Self {
-        LocalKey {
-            _marker: PhantomData,
-        }
+    pub const fn new(inner: &'static std::thread::LocalKey<T>) -> Self {
+        LocalKey { inner }
     }
 
-    pub fn with<F, R>(&'static self, _f: F) -> R
+    /// Acquires a reference to the value in this TLS key.
+    ///
+    /// This will lazily initialize the value if this is the first time
+    /// the current thread has called `with` on this key.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the initialization function panics.
+    pub fn with<F, R>(&'static self, f: F) -> R
     where
         F: FnOnce(&T) -> R,
     {
-        todo!("wasm LocalKey::with")
+        self.inner.with(f)
     }
 
-    pub fn try_with<F, R>(&'static self, _f: F) -> Result<R, AccessError>
+    /// Acquires a reference to the value in this TLS key.
+    ///
+    /// Returns `Err(AccessError)` if the key is being destroyed or
+    /// was already destroyed.
+    pub fn try_with<F, R>(&'static self, f: F) -> Result<R, AccessError>
     where
         F: FnOnce(&T) -> R,
     {
-        todo!("wasm LocalKey::try_with")
+        self.inner.try_with(f).map_err(|_| AccessError)
     }
 }
 
@@ -282,8 +294,6 @@ impl<T: 'static> fmt::Debug for LocalKey<T> {
         f.debug_struct("LocalKey").finish_non_exhaustive()
     }
 }
-
-unsafe impl<T: 'static> Sync for LocalKey<T> {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AccessError;
@@ -454,7 +464,7 @@ where
 }
 
 pub fn current() -> Thread {
-    todo!("wasm current")
+    todo!("wasm Current")
 }
 
 pub fn sleep(_dur: Duration) {

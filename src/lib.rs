@@ -60,11 +60,17 @@ macro_rules! thread_local {
 #[cfg(target_arch = "wasm32")]
 macro_rules! thread_local {
     ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = $init:expr; $($rest:tt)*) => {
-        $(#[$attr])* $vis static $name: $crate::LocalKey<$t> = $crate::LocalKey::new(|| $init);
+        std::thread_local! {
+            $(#[$attr])* static INNER: $t = $init;
+        }
+        $(#[$attr])* $vis static $name: $crate::LocalKey<$t> = $crate::LocalKey::new(&INNER);
         $crate::thread_local!($($rest)*);
     };
     ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = $init:expr) => {
-        $(#[$attr])* $vis static $name: $crate::LocalKey<$t> = $crate::LocalKey::new(|| $init);
+        std::thread_local! {
+            $(#[$attr])* static INNER: $t = $init;
+        }
+        $(#[$attr])* $vis static $name: $crate::LocalKey<$t> = $crate::LocalKey::new(&INNER);
     };
     () => {};
 }
@@ -226,6 +232,53 @@ mod tests {
 
         let result = VALUE.try_with(|v| v.get());
         assert_eq!(result.unwrap(), 100);
+    }
+
+    // Test that TLS values are isolated per-thread
+    crate::async_test! {
+        async fn test_thread_local_isolation() {
+            use std::cell::Cell;
+            use std::sync::atomic::{AtomicU32, Ordering};
+            use std::sync::Arc;
+
+            thread_local! {
+                static TLS_VALUE: Cell<u32> = Cell::new(0);
+            }
+
+            // Set main thread's TLS to 999
+            TLS_VALUE.with(|v| v.set(999));
+
+            // Spawned thread should see initial value (0), not main thread's value
+            let worker_saw = Arc::new(AtomicU32::new(0));
+            let worker_saw_clone = worker_saw.clone();
+
+            let handle = Builder::new()
+                .name("tls-isolation-test".to_string())
+                .spawn(move || {
+                    // Worker should see initial value, not main thread's 999
+                    let initial = TLS_VALUE.with(|v| v.get());
+                    worker_saw_clone.store(initial, Ordering::SeqCst);
+
+                    // Modify worker's TLS
+                    TLS_VALUE.with(|v| v.set(123));
+
+                    // Verify worker sees its own modification
+                    let after = TLS_VALUE.with(|v| v.get());
+                    assert_eq!(after, 123, "worker should see its own TLS modification");
+                })
+                .unwrap();
+
+            handle.join_async().await.unwrap();
+
+            // Worker should have seen initial value (0)
+            assert_eq!(worker_saw.load(Ordering::SeqCst), 0,
+                "spawned thread should see initial TLS value, not main thread's value");
+
+            // Main thread's TLS should be unchanged
+            TLS_VALUE.with(|v| {
+                assert_eq!(v.get(), 999, "main thread's TLS should be unchanged by worker");
+            });
+        }
     }
 
     #[test]
