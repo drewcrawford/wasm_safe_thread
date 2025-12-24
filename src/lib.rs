@@ -6,6 +6,7 @@ extern crate alloc;
 mod stdlib;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
+mod hooks;
 mod test_executor;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -18,6 +19,7 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 pub use backend::{AccessError, Builder, JoinHandle, LocalKey, Thread, ThreadId};
+pub use hooks::{clear_spawn_hooks, register_spawn_hook, remove_spawn_hook};
 
 /// Declare a new thread local storage key of type [`LocalKey`].
 ///
@@ -350,62 +352,214 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_spawn_hook_single() {
-        use std::sync::{Arc, Mutex};
+    // Note: These hook tests use unique hook names to avoid interference
+    // when tests run in parallel. Each test only removes its own hooks.
 
-        let order = Arc::new(Mutex::new(Vec::new()));
-        let order_clone = order.clone();
-        let order_main = order.clone();
+    async_test! {
+        async fn test_spawn_hook_single() {
+            use std::sync::{Arc, Mutex};
 
-        let handle = Builder::new()
-            .spawn_hook(move || {
-                order_clone.lock().unwrap().push(1);
-            })
-            .spawn(move || {
-                order_main.lock().unwrap().push(2);
-            })
-            .unwrap();
+            const HOOK_NAME: &str = "test_spawn_hook_single";
 
-        handle.join().unwrap();
+            let order = Arc::new(Mutex::new(Vec::new()));
+            let order_hook = order.clone();
+            let order_main = order.clone();
 
-        let result = order.lock().unwrap();
-        assert_eq!(*result, vec![1, 2], "hook should run before main function");
+            register_spawn_hook(HOOK_NAME, move || {
+                order_hook.lock().unwrap().push(1);
+            });
+
+            let handle = Builder::new()
+                .spawn(move || {
+                    order_main.lock().unwrap().push(2);
+                })
+                .unwrap();
+
+            handle.join_async().await.unwrap();
+
+            remove_spawn_hook(HOOK_NAME);
+
+            let result = order.lock().unwrap();
+            // Hook ran once, then main function
+            assert!(result.contains(&1), "hook should have run");
+            assert!(result.contains(&2), "main function should have run");
+            // Verify hook ran before main (find positions)
+            let hook_pos = result.iter().position(|&x| x == 1).unwrap();
+            let main_pos = result.iter().position(|&x| x == 2).unwrap();
+            assert!(hook_pos < main_pos, "hook should run before main function");
+        }
     }
 
-    #[test]
-    fn test_spawn_hook_multiple_in_order() {
-        use std::sync::{Arc, Mutex};
+    async_test! {
+        async fn test_spawn_hook_multiple_in_order() {
+            use std::sync::{Arc, Mutex};
 
-        let order = Arc::new(Mutex::new(Vec::new()));
-        let o1 = order.clone();
-        let o2 = order.clone();
-        let o3 = order.clone();
-        let o_main = order.clone();
+            const HOOK1: &str = "test_spawn_hook_multiple_1";
+            const HOOK2: &str = "test_spawn_hook_multiple_2";
+            const HOOK3: &str = "test_spawn_hook_multiple_3";
 
-        let handle = Builder::new()
-            .spawn_hook(move || {
+            let order = Arc::new(Mutex::new(Vec::new()));
+            let o1 = order.clone();
+            let o2 = order.clone();
+            let o3 = order.clone();
+            let o_main = order.clone();
+
+            register_spawn_hook(HOOK1, move || {
                 o1.lock().unwrap().push(1);
-            })
-            .spawn_hook(move || {
+            });
+            register_spawn_hook(HOOK2, move || {
                 o2.lock().unwrap().push(2);
-            })
-            .spawn_hook(move || {
+            });
+            register_spawn_hook(HOOK3, move || {
                 o3.lock().unwrap().push(3);
-            })
-            .spawn(move || {
-                o_main.lock().unwrap().push(100);
-            })
-            .unwrap();
+            });
 
-        handle.join().unwrap();
+            let handle = Builder::new()
+                .spawn(move || {
+                    o_main.lock().unwrap().push(100);
+                })
+                .unwrap();
 
-        let result = order.lock().unwrap();
-        assert_eq!(
-            *result,
-            vec![1, 2, 3, 100],
-            "hooks should run in order before main function"
-        );
+            handle.join_async().await.unwrap();
+
+            remove_spawn_hook(HOOK1);
+            remove_spawn_hook(HOOK2);
+            remove_spawn_hook(HOOK3);
+
+            let result = order.lock().unwrap();
+            // Find positions of our markers
+            let pos1 = result.iter().position(|&x| x == 1);
+            let pos2 = result.iter().position(|&x| x == 2);
+            let pos3 = result.iter().position(|&x| x == 3);
+            let pos_main = result.iter().position(|&x| x == 100);
+
+            // All hooks and main should have run
+            assert!(pos1.is_some(), "hook1 should have run");
+            assert!(pos2.is_some(), "hook2 should have run");
+            assert!(pos3.is_some(), "hook3 should have run");
+            assert!(pos_main.is_some(), "main should have run");
+
+            // Verify order: hooks in registration order, then main
+            let pos1 = pos1.unwrap();
+            let pos2 = pos2.unwrap();
+            let pos3 = pos3.unwrap();
+            let pos_main = pos_main.unwrap();
+            assert!(pos1 < pos2, "hook1 should run before hook2");
+            assert!(pos2 < pos3, "hook2 should run before hook3");
+            assert!(pos3 < pos_main, "hook3 should run before main");
+        }
+    }
+
+    async_test! {
+        async fn test_remove_spawn_hook() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::Arc;
+
+            const HOOK1: &str = "test_remove_hook1";
+            const HOOK2: &str = "test_remove_hook2";
+
+            // Use flags instead of counters to be robust against parallel tests
+            let hook1_ran = Arc::new(AtomicBool::new(false));
+            let hook2_ran = Arc::new(AtomicBool::new(false));
+            let h1 = hook1_ran.clone();
+            let h2 = hook2_ran.clone();
+
+            register_spawn_hook(HOOK1, move || {
+                h1.store(true, Ordering::SeqCst);
+            });
+            register_spawn_hook(HOOK2, move || {
+                h2.store(true, Ordering::SeqCst);
+            });
+
+            // Remove hook1
+            assert!(remove_spawn_hook(HOOK1));
+            assert!(!remove_spawn_hook("nonexistent"));
+
+            // Reset flags before spawning
+            hook1_ran.store(false, Ordering::SeqCst);
+            hook2_ran.store(false, Ordering::SeqCst);
+
+            let handle = spawn(|| {});
+            handle.join_async().await.unwrap();
+
+            // Check flags after join
+            let h1_ran = hook1_ran.load(Ordering::SeqCst);
+            let h2_ran = hook2_ran.load(Ordering::SeqCst);
+
+            remove_spawn_hook(HOOK2);
+
+            // hook1 was removed so shouldn't have run, hook2 should have run
+            assert!(!h1_ran, "removed hook1 should not have run");
+            assert!(h2_ran, "hook2 should have run");
+        }
+    }
+
+    async_test! {
+        async fn test_clear_spawn_hooks() {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            use std::sync::Arc;
+
+            const HOOK: &str = "test_clear_hook";
+
+            let counter = Arc::new(AtomicU32::new(0));
+            let c = counter.clone();
+
+            register_spawn_hook(HOOK, move || {
+                c.fetch_add(1, Ordering::SeqCst);
+            });
+
+            // Remove just this hook (not clear_spawn_hooks which would affect other tests)
+            remove_spawn_hook(HOOK);
+
+            let before = counter.load(Ordering::SeqCst);
+            let handle = spawn(|| {});
+            handle.join_async().await.unwrap();
+            let after = counter.load(Ordering::SeqCst);
+
+            // Our hook was removed so it shouldn't have incremented
+            // (other hooks from parallel tests may run, but ours won't)
+            assert_eq!(after, before, "removed hook should not run");
+        }
+    }
+
+    async_test! {
+        async fn test_replace_hook_same_name() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::Arc;
+
+            const HOOK: &str = "test_replace_same_name";
+
+            // Use flags to be robust against parallel tests
+            let first_hook_ran = Arc::new(AtomicBool::new(false));
+            let second_hook_ran = Arc::new(AtomicBool::new(false));
+            let f1 = first_hook_ran.clone();
+            let f2 = second_hook_ran.clone();
+
+            register_spawn_hook(HOOK, move || {
+                f1.store(true, Ordering::SeqCst);
+            });
+            // Register with same name - should replace
+            register_spawn_hook(HOOK, move || {
+                f2.store(true, Ordering::SeqCst);
+            });
+
+            // Reset flags before spawning
+            first_hook_ran.store(false, Ordering::SeqCst);
+            second_hook_ran.store(false, Ordering::SeqCst);
+
+            let handle = spawn(|| {});
+            handle.join_async().await.unwrap();
+
+            // Check flags after join
+            let first_ran = first_hook_ran.load(Ordering::SeqCst);
+            let second_ran = second_hook_ran.load(Ordering::SeqCst);
+
+            remove_spawn_hook(HOOK);
+
+            // Second hook replaced first, so only second should have run
+            assert!(!first_ran, "first hook should have been replaced");
+            assert!(second_ran, "second hook should have run");
+        }
     }
 
     crate::async_test! {

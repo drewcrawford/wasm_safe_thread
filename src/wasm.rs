@@ -447,7 +447,6 @@ pub struct ThreadId(u64);
 pub struct Builder {
     _name: Option<String>,
     _stack_size: Option<usize>,
-    _spawn_hooks: Vec<Box<dyn FnOnce() + Send + 'static>>,
     _shim_name: Option<String>,
 }
 
@@ -456,7 +455,6 @@ impl Builder {
         Builder {
             _name: None,
             _stack_size: None,
-            _spawn_hooks: Vec::new(),
             _shim_name: None,
         }
     }
@@ -475,14 +473,6 @@ impl Builder {
 
     pub fn stack_size(mut self, size: usize) -> Self {
         self._stack_size = Some(size);
-        self
-    }
-
-    pub fn spawn_hook<H>(mut self, hook: H) -> Self
-    where
-        H: FnOnce() + Send + 'static,
-    {
-        self._spawn_hooks.push(Box::new(hook));
         self
     }
 
@@ -510,6 +500,8 @@ impl Builder {
             CURRENT_THREAD.with(|cell| {
                 *cell.borrow_mut() = Some(thread_for_worker);
             });
+
+            crate::hooks::run_spawn_hooks();
 
             let result = f();
             // Ignore send errors - receiver may have been dropped if JoinHandle wasn't joined
