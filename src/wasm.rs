@@ -37,6 +37,80 @@ function getShimUrl(shimName) {
   return base + "/" + shimName + ".js";
 }
 
+// Auto-detect the shim URL from loaded resources using Performance API (browser only)
+function detectShimUrl() {
+  const idx = SELF_URL.indexOf("/snippets/");
+  if (idx === -1) {
+    throw new Error("Cannot derive shim URL: SELF_URL doesn't contain /snippets/: " + SELF_URL);
+  }
+  const base = SELF_URL.slice(0, idx);
+
+  // Performance API resource tracking only works in browsers, not Node.js
+  if (isNode()) {
+    return null;
+  }
+
+  // Find loaded JS modules at the base path
+  // initiatorType can be 'script', 'module', 'other', etc. depending on browser
+  const resources = performance.getEntriesByType('resource');
+  for (const r of resources) {
+    if (!r.name.startsWith(base + '/')) continue;
+    if (r.name.includes('/snippets/')) continue;
+
+    // Extract path without query string
+    const url = new URL(r.name);
+    const path = url.pathname;
+
+    // Skip run.js (wasm-bindgen-test-runner's test runner)
+    if (path.endsWith('/run.js')) continue;
+
+    // Match .js files or extensionless paths (ES module imports)
+    // Extensionless: /wasm-bindgen-test, /my-example
+    // With extension: /wasm-bindgen-test.js
+    if (path.endsWith('.js')) {
+      return r.name.split('?')[0];  // Return full URL without query string
+    }
+
+    // Also match extensionless imports (Firefox records ES modules without extension)
+    // These should be simple names with no extension and no dots
+    const filename = path.split('/').pop();
+    if (filename && !filename.includes('.') && filename !== 'favicon') {
+      return r.name.split('?')[0] + '.js';  // Add .js for consistency
+    }
+  }
+
+  // Fallback to constructed URL if detection fails
+  return null;
+}
+
+// For testing: return the detected shim URL (or null if detection fails)
+export function get_detected_shim_url() {
+  return detectShimUrl();
+}
+
+// For debugging: return all resource entries as JSON
+export function get_performance_resources_debug() {
+  const idx = SELF_URL.indexOf("/snippets/");
+  const base = idx === -1 ? null : SELF_URL.slice(0, idx);
+  const resources = performance.getEntriesByType('resource');
+  return JSON.stringify({
+    selfUrl: SELF_URL,
+    base: base,
+    resources: resources.map(r => ({
+      name: r.name,
+      initiatorType: r.initiatorType,
+      matchesBase: base ? r.name.startsWith(base + '/') : false,
+      endsWithJs: r.name.endsWith('.js'),
+      hasSnippets: r.name.includes('/snippets/')
+    }))
+  }, null, 2);
+}
+
+// For testing: return the shim URL that would be used for a given shim name
+export function get_shim_url_for_testing(shimName) {
+  return getShimUrl(shimName);
+}
+
 // Browser worker script - uses Web Worker API
 function makeBrowserWorkerScript(shimUrl, entryName) {
   return `
@@ -97,7 +171,14 @@ function makeNodeWorkerScript(shimUrl, entryName) {
 }
 
 export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimName) {
-  const shimUrl = getShimUrl(shimName);
+  // Determine shim URL: use explicit name if provided, otherwise auto-detect
+  let shimUrl;
+  if (shimName) {
+    shimUrl = getShimUrl(shimName);
+  } else {
+    // Try auto-detection, fall back to wasm-bindgen-test for test runner compatibility
+    shimUrl = detectShimUrl() || getShimUrl("wasm-bindgen-test");
+  }
   const entryName = "wasm_safe_thread_entry_point";
 
   // Browser: use Web Worker API
@@ -145,6 +226,9 @@ export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimNa
 )]
 extern "C" {
     fn wasm_safe_thread_spawn_worker(work: JsValue, module: JsValue, memory: JsValue, name: &str, shim_name: &str) -> WorkerLike;
+    fn get_shim_url_for_testing(shim_name: &str) -> String;
+    fn get_detected_shim_url() -> Option<String>;
+    fn get_performance_resources_debug() -> String;
 
     type WorkerLike;
 
@@ -589,8 +673,8 @@ impl Builder {
         let ptr = Box::into_raw(boxed) as *mut () as usize;
         let work: JsValue = (ptr as f64).into();
 
-        // Default shim name to "wasm-bindgen-test" for tests - override with Builder::shim_name() for examples/binaries
-        let shim_name = self._shim_name.as_deref().unwrap_or("wasm-bindgen-test");
+        // If shim_name not explicitly set, pass empty string to trigger auto-detection in JS
+        let shim_name = self._shim_name.as_deref().unwrap_or("");
 
         // The on_msg callback isn't used yet; Worker closes itself after running entrypoint.
         spawn_with_shared_module(work, &worker_name, shim_name, |_| {
@@ -696,6 +780,46 @@ pub fn available_parallelism() -> io::Result<NonZeroUsize> {
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn test_is_main_thread() {
         assert!(is_main_thread());
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn test_default_shim_url_is_wasm_bindgen_test() {
+        // Verify that the default shim URL ends with "wasm-bindgen-test.js"
+        // This is the expected behavior when running wasm-bindgen-test tests
+        let url = get_shim_url_for_testing("wasm-bindgen-test");
+        assert!(
+            url.ends_with("/wasm-bindgen-test.js"),
+            "Expected shim URL to end with /wasm-bindgen-test.js, got: {}",
+            url
+        );
+    }
+
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn test_detect_shim_url_finds_wasm_bindgen_test() {
+        // Performance API resource tracking only works in browsers, not Node.js
+        if is_node() {
+            // In Node.js, detection returns None - this is expected
+            assert!(
+                get_detected_shim_url().is_none(),
+                "In Node.js, shim URL detection should return None"
+            );
+            return;
+        }
+
+        // When running in a browser, we should detect wasm-bindgen-test.js
+        let debug_info = get_performance_resources_debug();
+        let detected = get_detected_shim_url();
+        assert!(
+            detected.is_some(),
+            "Should detect shim URL from loaded resources. Debug info:\n{}",
+            debug_info
+        );
+        let url = detected.unwrap();
+        assert!(
+            url.ends_with("/wasm-bindgen-test.js"),
+            "Expected detected shim URL to end with /wasm-bindgen-test.js, got: {}",
+            url
+        );
     }
 
     // Test that park_timeout works on Node.js main thread (Atomics.wait is available there)
