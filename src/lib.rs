@@ -21,6 +21,9 @@ use std::time::Duration;
 pub use backend::{AccessError, Builder, JoinHandle, LocalKey, Thread, ThreadId};
 pub use hooks::{clear_spawn_hooks, register_spawn_hook, remove_spawn_hook};
 
+#[cfg(target_arch = "wasm32")]
+pub use backend::yield_to_event_loop_async;
+
 /// Declare a new thread local storage key of type [`LocalKey`].
 ///
 /// # Examples
@@ -668,6 +671,87 @@ mod tests {
 
             let result = handle.join_async().await.unwrap();
             assert_eq!(result, "done");
+        }
+    }
+
+    // Test is_finished returns false before thread completes
+    crate::async_test! {
+        async fn test_is_finished_false_initially() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            use std::sync::Arc;
+
+            let can_exit = Arc::new(AtomicBool::new(false));
+            let can_exit_clone = can_exit.clone();
+
+            let handle = Builder::new()
+                .name("is_finished_test".to_string())
+                .spawn(move || {
+                    // Wait until main thread tells us to exit
+                    while !can_exit_clone.load(Ordering::Acquire) {
+                        sleep(Duration::from_millis(10));
+                    }
+                    42
+                })
+                .unwrap();
+
+            // Thread is running, should not be finished yet
+            assert!(!handle.is_finished(), "thread should not be finished while running");
+
+            // Allow thread to exit
+            can_exit.store(true, Ordering::Release);
+
+            // Wait for completion
+            let result = handle.join_async().await.unwrap();
+            assert_eq!(result, 42);
+        }
+    }
+
+    // Test is_finished returns true after thread completes
+    crate::async_test! {
+        async fn test_is_finished_true_after_complete() {
+            let handle = Builder::new()
+                .name("is_finished_complete".to_string())
+                .spawn(|| {
+                    // Return immediately
+                    123
+                })
+                .unwrap();
+
+            // Wait for completion via join
+            let result = handle.join_async().await.unwrap();
+            assert_eq!(result, 123);
+            // Note: We can't check is_finished after join because join consumes the handle
+        }
+    }
+
+    // Test is_finished by polling from async context with proper event loop yields
+    crate::async_test! {
+        async fn test_is_finished_without_join() {
+            // Spawn a thread that returns quickly
+            let handle = Builder::new()
+                .name("is_finished_target".to_string())
+                .spawn(|| {
+                    42
+                })
+                .unwrap();
+
+            // Yield to event loop to let the worker start
+            #[cfg(target_arch = "wasm32")]
+            crate::yield_to_event_loop_async().await;
+
+            // Poll is_finished with async yields until it becomes true
+            let mut attempts = 0;
+            while !handle.is_finished() && attempts < 1_000 {
+                #[cfg(target_arch = "wasm32")]
+                crate::yield_to_event_loop_async().await;
+                #[cfg(not(target_arch = "wasm32"))]
+                sleep(Duration::from_millis(10));
+                attempts += 1;
+            }
+
+            assert!(handle.is_finished(), "thread should be finished after polling");
+            let result = handle.join_async().await.unwrap();
+            assert_eq!(result, 42);
         }
     }
 

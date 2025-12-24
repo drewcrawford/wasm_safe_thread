@@ -3,7 +3,7 @@
 use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,6 +15,7 @@ std::thread_local! {
 
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen_futures;
 
 #[wasm_bindgen(
     inline_js = r#"
@@ -42,19 +43,13 @@ function makeBrowserWorkerScript(shimUrl, entryName) {
     self.onmessage = async (e) => {
       try {
         const [module, memory, work] = e.data;
-        console.log("Worker received:", { module, memory, work });
-        console.log("Memory buffer:", memory.buffer);
-        console.log("Memory buffer byteLength:", memory.buffer.byteLength);
-        console.log("Is SharedArrayBuffer:", memory.buffer instanceof SharedArrayBuffer);
 
         // Cache-bust to get fresh module state per worker (needed for Safari)
         const url = ${JSON.stringify(shimUrl)} + '?worker=' + Math.random();
         const shim = await import(url);
-        console.log("Shim loaded, calling initSync");
 
         // Use initSync with module and memory from main thread
         shim.initSync({ module, memory, thread_stack_size: 1048576 });
-        console.log("initSync complete");
 
         // Call the entry point
         shim[${JSON.stringify(entryName)}](work);
@@ -103,7 +98,6 @@ function makeNodeWorkerScript(shimUrl, entryName) {
 
 export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimName) {
   const shimUrl = getShimUrl(shimName);
-  console.log("Shim URL:", shimUrl);
   const entryName = "wasm_safe_thread_entry_point";
 
   // Browser: use Web Worker API
@@ -111,9 +105,15 @@ export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimNa
     const src = makeBrowserWorkerScript(shimUrl, entryName);
     const blob = new Blob([src], { type: "text/javascript" });
     const blobUrl = URL.createObjectURL(blob);
+
     const w = new Worker(blobUrl, { type: "module", name });
-    URL.revokeObjectURL(blobUrl);
+
+    w.onerror = (e) => {
+      console.error("Worker error:", e.message, e.filename, e.lineno);
+    };
+
     w.postMessage([module, memory, work]);
+    URL.revokeObjectURL(blobUrl);
 
     return {
       postMessage: (msg) => w.postMessage(msg),
@@ -189,6 +189,12 @@ export function is_main_thread() {
 
 let __yield_sab = new SharedArrayBuffer(4);
 let __yield_i32 = new Int32Array(__yield_sab);
+
+// Yields to the browser event loop using setTimeout.
+// Returns a Promise that resolves after the event loop processes.
+export async function yield_to_event_loop() {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
 
 // Returns one of:
 //   "ok" | "not-equal" | "timed-out" | "unsupported"
@@ -313,6 +319,7 @@ extern "C" {
     fn is_node() -> bool;
     fn is_main_thread() -> bool;
     fn atomics_wait_timeout_ms_try(timeout_ms: f64) -> JsValue;
+    fn yield_to_event_loop() -> js_sys::Promise;
     fn sleep_sync_ms(ms: f64);
     fn get_available_parallelism() -> u32;
     fn park_wait_at_addr(memory: &JsValue, ptr: u32) -> JsValue;
@@ -444,6 +451,7 @@ impl std::error::Error for AccessError {}
 pub struct JoinHandle<T> {
     receiver: wasm_safe_mutex::mpsc::Receiver<T>,
     thread: Thread,
+    finished: Arc<AtomicBool>,
 }
 
 impl<T> JoinHandle<T> {
@@ -468,7 +476,7 @@ impl<T> JoinHandle<T> {
     }
 
     pub fn is_finished(&self) -> bool {
-        todo!("wasm JoinHandle::is_finished")
+        self.finished.load(Ordering::Acquire)
     }
 }
 
@@ -557,6 +565,9 @@ impl Builder {
         });
         let thread_for_worker = thread.clone();
 
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_for_worker = finished.clone();
+
         let (send, recv) = wasm_safe_mutex::mpsc::channel();
         let closure = move || {
             // Set up TLS for current() before running user code
@@ -567,6 +578,8 @@ impl Builder {
             crate::hooks::run_spawn_hooks();
 
             let result = f();
+            // Mark as finished before sending result (Release pairs with Acquire in is_finished)
+            finished_for_worker.store(true, Ordering::Release);
             // Ignore send errors - receiver may have been dropped if JoinHandle wasn't joined
             let _ = send.send_sync(result);
         };
@@ -587,6 +600,7 @@ impl Builder {
         Ok(JoinHandle {
             receiver: recv,
             thread,
+            finished,
         })
     }
 }
@@ -638,6 +652,13 @@ pub fn sleep(dur: Duration) {
 
 pub fn yield_now() {
     atomics_wait_timeout_ms_try(0.001);
+}
+
+/// Yields to the browser event loop, allowing pending tasks (like worker startup) to execute.
+/// This is necessary when spawning workers from within workers, as the child worker
+/// won't start executing until the parent yields to the event loop.
+pub async fn yield_to_event_loop_async() {
+    let _: JsValue = wasm_bindgen_futures::JsFuture::from(yield_to_event_loop()).await.unwrap();
 }
 
 pub fn park() {
