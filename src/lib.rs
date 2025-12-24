@@ -20,8 +20,6 @@ use std::time::Duration;
 
 pub use backend::{AccessError, Builder, JoinHandle, LocalKey, Thread, ThreadId};
 pub use hooks::{clear_spawn_hooks, register_spawn_hook, remove_spawn_hook};
-
-#[cfg(target_arch = "wasm32")]
 pub use backend::yield_to_event_loop_async;
 
 /// Declare a new thread local storage key of type [`LocalKey`].
@@ -736,22 +734,31 @@ mod tests {
                 .unwrap();
 
             // Yield to event loop to let the worker start
-            #[cfg(target_arch = "wasm32")]
             crate::yield_to_event_loop_async().await;
 
             // Poll is_finished with async yields until it becomes true
             let mut attempts = 0;
             while !handle.is_finished() && attempts < 1_000 {
-                #[cfg(target_arch = "wasm32")]
                 crate::yield_to_event_loop_async().await;
-                #[cfg(not(target_arch = "wasm32"))]
-                sleep(Duration::from_millis(10));
                 attempts += 1;
             }
 
             assert!(handle.is_finished(), "thread should be finished after polling");
             let result = handle.join_async().await.unwrap();
             assert_eq!(result, 42);
+        }
+    }
+
+    // Test that yield_to_event_loop_async completes without hanging
+    async_test! {
+        async fn test_yield_to_event_loop_async() {
+            // Basic test: should complete without hanging
+            crate::yield_to_event_loop_async().await;
+
+            // Multiple yields should work
+            for _ in 0..10 {
+                crate::yield_to_event_loop_async().await;
+            }
         }
     }
 

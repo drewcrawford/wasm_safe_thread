@@ -209,3 +209,31 @@ pub fn park_timeout(dur: Duration) {
 pub fn available_parallelism() -> io::Result<NonZeroUsize> {
     thread::available_parallelism()
 }
+
+/// A future that yields once to the async executor, then completes.
+struct YieldOnce {
+    yielded: bool,
+}
+
+impl std::future::Future for YieldOnce {
+    type Output = ();
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        if self.yielded {
+            std::task::Poll::Ready(())
+        } else {
+            self.yielded = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+}
+
+/// Yields to the async executor, allowing other tasks to run.
+///
+/// On wasm32, this yields to the browser event loop. On native platforms,
+/// this yields to the async executor's scheduler by returning Pending once
+/// and immediately re-scheduling the task.
+pub async fn yield_to_event_loop_async() {
+    YieldOnce { yielded: false }.await
+}
