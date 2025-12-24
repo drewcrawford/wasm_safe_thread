@@ -61,6 +61,7 @@ impl std::error::Error for AccessError {}
 pub struct JoinHandle<T> {
     std_handle: thread::JoinHandle<()>,
     receiver: mpsc::Receiver<Result<T, Box<dyn std::any::Any + Send + 'static>>>,
+    thread: Thread,
 }
 
 impl<T> JoinHandle<T> {
@@ -80,10 +81,7 @@ impl<T> JoinHandle<T> {
 
     /// Gets the thread associated with this handle.
     pub fn thread(&self) -> &Thread {
-        // We need to wrap the thread reference, but since Thread wraps std::thread::Thread
-        // and we can't easily do that for a reference, we'll need a different approach.
-        // For now, this is a limitation - we could store the Thread in JoinHandle.
-        unimplemented!("thread() not yet implemented")
+        &self.thread
     }
 
     /// Checks if the thread has finished running.
@@ -154,7 +152,8 @@ impl Builder {
             let result = catch_unwind(AssertUnwindSafe(f));
             let _ = sender.send_sync(result);
         })?;
-        Ok(JoinHandle { std_handle, receiver })
+        let thread = Thread(std_handle.thread().clone());
+        Ok(JoinHandle { std_handle, receiver, thread })
     }
 }
 
@@ -176,7 +175,8 @@ where
         let result = catch_unwind(AssertUnwindSafe(f));
         let _ = sender.send_sync(result);
     });
-    JoinHandle { std_handle, receiver }
+    let thread = Thread(std_handle.thread().clone());
+    JoinHandle { std_handle, receiver, thread }
 }
 
 /// Gets a handle to the thread that invokes it.

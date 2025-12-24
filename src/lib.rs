@@ -604,4 +604,71 @@ mod tests {
         }
     }
 
+    // Test that park/unpark works on background thread
+    // Note: We can't spin-wait on the main thread in wasm (blocks event loop),
+    // so we just unpark and rely on the token mechanism - if unpark happens
+    // before park, the token is consumed and park returns immediately.
+    crate::async_test! {
+        async fn test_park_unpark_background() {
+            let handle = Builder::new()
+                .name("parker".to_string())
+                .spawn(|| {
+                    park();
+                    42
+                })
+                .unwrap();
+
+            // Unpark the thread - either wakes it or sets a token for when it parks
+            handle.thread().unpark();
+
+            // Join should succeed
+            let result = handle.join_async().await.unwrap();
+            assert_eq!(result, 42);
+        }
+    }
+
+    // Test park_timeout on background thread
+    crate::async_test! {
+        async fn test_park_timeout_background() {
+            #[cfg(not(target_arch = "wasm32"))]
+            use std::time::Instant;
+            #[cfg(target_arch = "wasm32")]
+            use web_time::Instant;
+
+            let handle = Builder::new()
+                .name("park_timeout".to_string())
+                .spawn(|| {
+                    let start = Instant::now();
+                    park_timeout(Duration::from_millis(100));
+                    start.elapsed()
+                })
+                .unwrap();
+
+            let elapsed = handle.join_async().await.unwrap();
+            // Should have waited at least 100ms (but allow some slack)
+            assert!(elapsed >= Duration::from_millis(90),
+                "park_timeout should wait at least 90ms, but only waited {:?}", elapsed);
+        }
+    }
+
+    // Test that unpark before park doesn't block
+    crate::async_test! {
+        async fn test_unpark_before_park() {
+            let handle = Builder::new()
+                .name("pre-unpark".to_string())
+                .spawn(|| {
+                    let thread = current();
+                    // Unpark ourselves before parking
+                    thread.unpark();
+                    // This should return immediately since we have a token
+                    park();
+                    "done"
+                })
+                .unwrap();
+
+            let result = handle.join_async().await.unwrap();
+            assert_eq!(result, "done");
+        }
+    }
+
 }
