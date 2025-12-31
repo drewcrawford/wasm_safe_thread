@@ -276,8 +276,10 @@ let __yield_i32 = new Int32Array(__yield_sab);
 
 // Yields to the browser event loop using setTimeout.
 // Returns a Promise that resolves after the event loop processes.
+// Note: We use 1ms instead of 0 because Chrome batches zero-delay timeouts
+// aggressively, which may not give workers enough time to execute.
 export async function yield_to_event_loop() {
-  return new Promise(resolve => setTimeout(resolve, 0));
+  return new Promise(resolve => setTimeout(resolve, 1));
 }
 
 // Returns one of:
@@ -411,15 +413,13 @@ extern "C" {
     fn park_notify_at_addr(memory: &JsValue, ptr: u32);
 }
 
-
-
-
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console, js_name = log)]
     fn console_log_js(v: &JsValue);
 }
 
+#[allow(unused)]
 fn log_str(s: &str) {
     console_log_js(&JsValue::from_str(s));
 }
