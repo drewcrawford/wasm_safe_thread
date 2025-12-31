@@ -457,19 +457,11 @@ pub fn spawn_with_shared_module(work: JsValue, name: &str, shim_name: &str, mut 
 
 #[wasm_bindgen]
 pub fn wasm_safe_thread_entry_point(work: JsValue) {
-    log_str("entry_point: start");
-
     let ptr = work.as_f64().unwrap() as usize;
-    log_str(&format!("entry_point: ptr = {:#x}", ptr));
-
     // SAFETY: ptr came from Box::into_raw in spawn(), and we're the only consumer
-    log_str("entry_point: about to Box::from_raw");
     let boxed = unsafe { Box::from_raw(ptr as *mut Box<dyn FnOnce() + Send>) };
-    log_str("entry_point: got boxed");
     let closure = *boxed;
-    log_str("entry_point: got closure, about to call");
     closure();
-    log_str("entry_point: closure complete");
 }
 
 /// A thread local storage key which owns its contents.
@@ -677,9 +669,7 @@ impl Builder {
         let shim_name = self._shim_name.as_deref().unwrap_or("");
 
         // The on_msg callback isn't used yet; Worker closes itself after running entrypoint.
-        spawn_with_shared_module(work, &worker_name, shim_name, |_| {
-            log_str("on message");
-        });
+        spawn_with_shared_module(work, &worker_name, shim_name, |_| {});
 
         Ok(JoinHandle {
             receiver: recv,

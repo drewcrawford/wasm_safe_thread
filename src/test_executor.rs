@@ -42,7 +42,7 @@ pub fn spawn<F: Future>(future: F) -> F::Output {
     let mut cx = Context::from_waker(&waker);
     loop {
         match f.as_mut().poll(&mut cx) {
-            Poll::Pending => {},
+            Poll::Pending => { std::thread::yield_now(); },
             Poll::Ready(r) => { return r; }
         }
     }
