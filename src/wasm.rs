@@ -13,13 +13,63 @@ std::thread_local! {
     static CURRENT_THREAD: std::cell::RefCell<Option<Thread>> = const { std::cell::RefCell::new(None) };
 }
 
+use std::sync::Once;
+
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures;
 
+/// Ensures handlers are registered exactly once.
+static INIT_HANDLERS: Once = Once::new();
+
+/// Registers the cleanup handler with JavaScript.
+/// Called lazily on first spawn. The Closure is intentionally leaked (one-time setup).
+fn init_handlers() {
+    INIT_HANDLERS.call_once(|| {
+        // Cleanup handler for freeing exit_state when ref_count reaches 0
+        let cleanup_handler = Closure::wrap(Box::new(|exit_state_ptr: u32| {
+            wasm_free_exit_state(exit_state_ptr);
+        }) as Box<dyn Fn(u32)>);
+        register_cleanup_handler(cleanup_handler.as_ref().unchecked_ref());
+        cleanup_handler.forget();
+    });
+}
+
+/// Frees exit_state memory when ref_count reaches 0.
+/// Called from JavaScript when the last reference (worker or JoinHandle) is released.
+///
+/// # Safety
+/// The pointer must be valid and point to a `[AtomicU32; 2]` allocated by Box::into_raw.
+fn wasm_free_exit_state(exit_state_ptr: u32) {
+    unsafe {
+        let ptr = exit_state_ptr as *mut [AtomicU32; 2];
+        drop(Box::from_raw(ptr));
+    }
+}
+
 #[wasm_bindgen(
     inline_js = r#"
 const SELF_URL = import.meta.url;
+
+// Global cleanup handler, registered once from Rust via register_cleanup_handler()
+// Called when exit_state ref_count reaches 0 to free the memory
+let __cleanup_handler = null;
+
+export function register_cleanup_handler(handler) {
+    __cleanup_handler = handler;
+}
+
+// Decrement ref_count and call cleanup if it reaches 0
+// exit_state layout: [exit_code: u32, ref_count: u32]
+function decrementRefCountAndCleanup(memory, exitStatePtr) {
+    const i32 = new Int32Array(memory.buffer);
+    const refCountIndex = (exitStatePtr >>> 2) + 1;  // ref_count is at offset 4
+    const oldRefCount = Atomics.sub(i32, refCountIndex, 1);
+    if (oldRefCount === 1 && __cleanup_handler) {
+        // We decremented from 1 to 0, we're the last reference
+        __cleanup_handler(exitStatePtr);
+    }
+}
 
 function isNode() {
   return typeof process !== "undefined" && process.versions && process.versions.node;
@@ -127,9 +177,13 @@ function makeBrowserWorkerScript(shimUrl, entryName) {
 
         // Call the entry point
         shim[${JSON.stringify(entryName)}](work);
+
+        // Signal exit before closing (browsers have no 'exit' event)
+        self.postMessage({ __wasm_safe_thread_exit: true });
         close();
       } catch (err) {
         console.error(err);
+        self.postMessage({ __wasm_safe_thread_error: err.message || String(err) });
         throw err;
       }
     };
@@ -170,7 +224,15 @@ function makeNodeWorkerScript(shimUrl, entryName) {
   `;
 }
 
-export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimName) {
+// Helper to signal exit via atomics (works cross-thread)
+function signalExit(memory, exitStatePtr, exitCode) {
+  const i32 = new Int32Array(memory.buffer);
+  const index = exitStatePtr >>> 2;  // Convert byte offset to i32 index
+  Atomics.store(i32, index, exitCode);  // 1 = success, 2 = error
+  Atomics.notify(i32, index, 1);  // Wake one waiter
+}
+
+export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimName, exitStatePtr) {
   // Determine shim URL: use explicit name if provided, otherwise auto-detect
   let shimUrl;
   if (shimName) {
@@ -189,8 +251,21 @@ export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimNa
 
     const w = new Worker(blobUrl, { type: "module", name });
 
+    w.onmessage = (e) => {
+      const data = e.data;
+      if (data && data.__wasm_safe_thread_exit) {
+        signalExit(memory, exitStatePtr, 1);  // Success
+        decrementRefCountAndCleanup(memory, exitStatePtr);
+      } else if (data && data.__wasm_safe_thread_error) {
+        signalExit(memory, exitStatePtr, 2);  // Error
+        decrementRefCountAndCleanup(memory, exitStatePtr);
+      }
+    };
+
     w.onerror = (e) => {
       console.error("Worker error:", e.message, e.filename, e.lineno);
+      signalExit(memory, exitStatePtr, 2);  // Error
+      decrementRefCountAndCleanup(memory, exitStatePtr);
     };
 
     w.postMessage([module, memory, work]);
@@ -199,7 +274,6 @@ export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimNa
     return {
       postMessage: (msg) => w.postMessage(msg),
       terminate: () => w.terminate(),
-      setOnMessage: (cb) => { w.onmessage = (e) => cb(e.data); },
     };
   }
 
@@ -209,6 +283,20 @@ export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimNa
       const { Worker } = await import("node:worker_threads");
       const src = makeNodeWorkerScript(shimUrl, entryName);
       const w = new Worker(src, { eval: true, type: "module", name });
+
+      // Note: Both 'error' and 'exit' events fire when a worker throws.
+      // We only handle signaling and cleanup in 'exit' to avoid double-decrement of ref_count.
+      // The exit code is non-zero when an error occurred.
+      w.on('exit', (code) => {
+        signalExit(memory, exitStatePtr, code === 0 ? 1 : 2);
+        decrementRefCountAndCleanup(memory, exitStatePtr);
+      });
+      w.on('error', (e) => {
+        // Log error for debugging, but don't signal/cleanup here.
+        // The 'exit' event always follows and handles cleanup.
+        console.error("Worker error:", e);
+      });
+
       w.postMessage([module, memory, work]);
       return w;
     })();
@@ -216,19 +304,57 @@ export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimNa
     return {
       postMessage: (msg) => ready.then(w => w.postMessage(msg)),
       terminate: () => ready.then(w => w.terminate()),
-      setOnMessage: (cb) => ready.then(w => w.on("message", cb)),
     };
   }
 
   throw new Error("No Worker API available");
 }
+
+// Wait async on an atomic - returns a Promise that resolves when the value changes from 0
+// Returns the new value (1 = success, 2 = error)
+export function wait_for_exit_async(memory, ptr) {
+  const i32 = new Int32Array(memory.buffer);
+  const index = ptr >>> 2;
+
+  // Check if already signaled
+  const current = Atomics.load(i32, index);
+  if (current !== 0) {
+    return Promise.resolve(current);
+  }
+
+  // Use Atomics.waitAsync if available
+  if (typeof Atomics.waitAsync === 'function') {
+    const result = Atomics.waitAsync(i32, index, 0);
+    if (result.async) {
+      return result.value.then(() => Atomics.load(i32, index));
+    } else {
+      // Already not equal, return current value
+      return Promise.resolve(Atomics.load(i32, index));
+    }
+  }
+
+  // Fallback: poll with setTimeout (for environments without waitAsync)
+  return new Promise((resolve) => {
+    const poll = () => {
+      const val = Atomics.load(i32, index);
+      if (val !== 0) {
+        resolve(val);
+      } else {
+        setTimeout(poll, 1);
+      }
+    };
+    poll();
+  });
+}
 "#
 )]
 extern "C" {
-    fn wasm_safe_thread_spawn_worker(work: JsValue, module: JsValue, memory: JsValue, name: &str, shim_name: &str) -> WorkerLike;
+    fn register_cleanup_handler(handler: &JsValue);
+    fn wasm_safe_thread_spawn_worker(work: JsValue, module: JsValue, memory: JsValue, name: &str, shim_name: &str, exit_state_ptr: u32) -> WorkerLike;
     fn get_shim_url_for_testing(shim_name: &str) -> String;
     fn get_detected_shim_url() -> Option<String>;
     fn get_performance_resources_debug() -> String;
+    fn wait_for_exit_async(memory: &JsValue, ptr: u32) -> js_sys::Promise;
 
     type WorkerLike;
 
@@ -237,9 +363,6 @@ extern "C" {
 
     #[wasm_bindgen(method)]
     fn terminate(this: &WorkerLike);
-
-    #[wasm_bindgen(method, js_name = setOnMessage)]
-    fn set_on_message(this: &WorkerLike, cb: &js_sys::Function);
 }
 
 #[wasm_bindgen(
@@ -427,7 +550,6 @@ fn log_str(s: &str) {
 #[allow(dead_code)]
 pub struct WorkerHandle {
     worker: WorkerLike,
-    _onmessage: Closure<dyn FnMut(JsValue)>,
 }
 
 #[allow(dead_code)]
@@ -440,19 +562,27 @@ impl WorkerHandle {
     }
 }
 
-pub fn spawn_with_shared_module(work: JsValue, name: &str, shim_name: &str, mut on_msg: impl FnMut(JsValue) + 'static) -> WorkerHandle {
-    let worker = wasm_safe_thread_spawn_worker(work, wasm_bindgen::module(), wasm_bindgen::memory(), name, shim_name);
+/// Spawns a worker with shared module and memory.
+///
+/// # Arguments
+/// * `work` - The work pointer (boxed closure) to execute
+/// * `name` - Worker name for debugging
+/// * `shim_name` - The wasm-bindgen shim name
+/// * `exit_state_ptr` - Pointer to exit state atomic (0=running, 1=success, 2=error)
+pub fn spawn_with_shared_module(work: JsValue, name: &str, shim_name: &str, exit_state_ptr: u32) -> WorkerHandle {
+    // Ensure handlers are registered with JS (one-time setup)
+    init_handlers();
 
-    let cb = Closure::wrap(Box::new(move |data: JsValue| {
-        on_msg(data);
-    }) as Box<dyn FnMut(JsValue)>);
+    let worker = wasm_safe_thread_spawn_worker(
+        work,
+        wasm_bindgen::module(),
+        wasm_bindgen::memory(),
+        name,
+        shim_name,
+        exit_state_ptr,
+    );
 
-    worker.set_on_message(cb.as_ref().unchecked_ref());
-
-    WorkerHandle {
-        worker,
-        _onmessage: cb,
-    }
+    WorkerHandle { worker }
 }
 
 #[wasm_bindgen]
@@ -528,6 +658,10 @@ pub struct JoinHandle<T> {
     receiver: wasm_safe_mutex::mpsc::Receiver<T>,
     thread: Thread,
     finished: Arc<AtomicBool>,
+    /// Pointer to exit_state: [exit_code: u32, ref_count: u32] in wasm linear memory.
+    /// This is managed via reference counting - worker and JoinHandle each hold a reference.
+    /// Whoever decrements ref_count to 0 frees the memory.
+    exit_state_ptr: u32,
 }
 
 impl<T> JoinHandle<T> {
@@ -541,10 +675,25 @@ impl<T> JoinHandle<T> {
     }
 
     pub async fn join_async(self) -> Result<T, Box<String>> {
-        self.receiver
+        // First get the return value from the channel
+        let result = self.receiver
             .recv_async()
             .await
-            .map_err(|e| Box::new(format!("{:?}", e)) as Box<String>)
+            .map_err(|e| Box::new(format!("{:?}", e)) as Box<String>)?;
+
+        // Then wait for the worker to actually exit
+        let exit_code = wasm_bindgen_futures::JsFuture::from(wait_for_exit_async(&wasm_bindgen::memory(), self.exit_state_ptr))
+            .await
+            .map_err(|e| Box::new(format!("Worker exit error: {:?}", e)) as Box<String>)?;
+
+        // Check exit code (1 = success, 2 = error)
+        let code = exit_code.as_f64().unwrap_or(0.0) as u32;
+        if code == 2 {
+            return Err(Box::new("Worker exited with error".to_string()));
+        }
+
+        Ok(result)
+        // Note: Drop impl will decrement ref_count and potentially free exit_state
     }
 
     pub fn thread(&self) -> &Thread {
@@ -553,6 +702,21 @@ impl<T> JoinHandle<T> {
 
     pub fn is_finished(&self) -> bool {
         self.finished.load(Ordering::Acquire)
+    }
+}
+
+impl<T> Drop for JoinHandle<T> {
+    fn drop(&mut self) {
+        // Decrement ref_count and free if we're the last reference.
+        // exit_state layout: [exit_code: u32, ref_count: u32]
+        let ptr = self.exit_state_ptr as *mut [AtomicU32; 2];
+        // SAFETY: ptr was created from Box::into_raw in spawn() and is valid
+        // as long as ref_count > 0. We're atomically decrementing ref_count.
+        let old_ref_count = unsafe { (*ptr)[1].fetch_sub(1, Ordering::AcqRel) };
+        if old_ref_count == 1 {
+            // We decremented from 1 to 0, we're the last reference - free the memory
+            unsafe { drop(Box::from_raw(ptr)); }
+        }
     }
 }
 
@@ -619,6 +783,26 @@ impl Builder {
         self
     }
 
+    /// Spawns a new thread with the configured settings.
+    ///
+    /// # Platform Notes (WASM)
+    ///
+    /// **The spawned thread will not begin executing until you yield to the JavaScript
+    /// event loop.** On WASM targets, worker threads are spawned asynchronously via
+    /// the JS event loop. When this function returns, the worker has been *created*
+    /// but has not yet *started*.
+    ///
+    /// You must yield to the event loop to allow the worker to begin:
+    ///
+    /// ```ignore
+    /// let handle = Builder::new().spawn(|| { /* ... */ }).unwrap();
+    /// yield_to_event_loop_async().await;  // Worker starts here, not above!
+    /// ```
+    ///
+    /// Failure to yield can cause:
+    /// - `is_finished()` to always return `false`
+    /// - Deadlocks when waiting on atomics the worker should have set
+    /// - Tests that hang indefinitely
     pub fn spawn<F, T>(self, f: F) -> io::Result<JoinHandle<T>>
     where
         F: FnOnce() -> T + Send + 'static,
@@ -644,6 +828,13 @@ impl Builder {
         let finished = Arc::new(AtomicBool::new(false));
         let finished_for_worker = finished.clone();
 
+        // Exit state: [exit_code: u32, ref_count: u32]
+        // - exit_code: 0 = running, 1 = exited successfully, 2 = exited with error
+        // - ref_count: starts at 2 (worker + JoinHandle), decremented on worker exit and JoinHandle drop
+        // Box'd so we get a stable address in wasm linear memory
+        let exit_state = Box::new([AtomicU32::new(0), AtomicU32::new(2)]);
+        let exit_state_ptr = Box::into_raw(exit_state) as u32;
+
         let (send, recv) = wasm_safe_mutex::mpsc::channel();
         let closure = move || {
             // Set up TLS for current() before running user code
@@ -668,13 +859,15 @@ impl Builder {
         // If shim_name not explicitly set, pass empty string to trigger auto-detection in JS
         let shim_name = self._shim_name.as_deref().unwrap_or("");
 
-        // The on_msg callback isn't used yet; Worker closes itself after running entrypoint.
-        spawn_with_shared_module(work, &worker_name, shim_name, |_| {});
+        // Spawn the worker. The WorkerHandle is not needed after spawn -
+        // the worker runs independently and signals completion via exit_state.
+        let _worker_handle = spawn_with_shared_module(work, &worker_name, shim_name, exit_state_ptr);
 
         Ok(JoinHandle {
             receiver: recv,
             thread,
             finished,
+            exit_state_ptr,
         })
     }
 }
@@ -685,6 +878,12 @@ impl Default for Builder {
     }
 }
 
+/// Spawns a new thread, returning a [`JoinHandle`] for it.
+///
+/// # Warning (WASM)
+///
+/// **The thread will not start until you yield to the JS event loop.**
+/// See [`Builder::spawn`] for details.
 pub fn spawn<F, T>(f: F) -> JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
@@ -835,5 +1034,50 @@ pub fn available_parallelism() -> io::Result<NonZeroUsize> {
         }
         // In browser, this will actually panic
         park_timeout(Duration::from_millis(1));
+    }
+
+    #[wasm_bindgen(inline_js = r#"
+export function schedule_delayed_throw() {
+    setTimeout(() => {
+        throw new Error('delayed error after closure returned');
+    }, 0);
+}
+"#)]
+    extern "C" {
+        fn schedule_delayed_throw();
+    }
+
+    // Test that join_async waits for worker exit and returns error if worker errors after sending value.
+    // This only works on Node.js - browser's close() cancels pending timers.
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn test_join_async_error_after_value_sent() {
+        if !is_node() {
+            // Browser cancels setTimeout when close() is called, so this test only works on Node
+            return;
+        }
+
+        // Spawn a worker that:
+        // 1. Schedules a setTimeout that throws an error
+        // 2. Returns a value successfully
+        // The setTimeout fires AFTER the closure returns (because Node keeps the event loop alive)
+        let handle = spawn(|| {
+            schedule_delayed_throw();
+            42
+        });
+
+        // Yield to event loop to let the worker start
+        yield_to_event_loop_async().await;
+
+        // join_async should:
+        // 1. Receive the value 42 from the channel
+        // 2. Wait for the exit signal
+        // 3. See exit_state = 2 (error) because the setTimeout threw
+        // 4. Return an error
+        let result = handle.join_async().await;
+        assert!(
+            result.is_err(),
+            "Expected error from delayed throw after value sent, got {:?}",
+            result
+        );
     }
 }
