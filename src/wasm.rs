@@ -11,6 +11,10 @@ static THREAD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 std::thread_local! {
     static CURRENT_THREAD: std::cell::RefCell<Option<Thread>> = const { std::cell::RefCell::new(None) };
+
+    /// Holds a closure that sends a panic error through the channel.
+    /// This is set before running user code and called from the panic hook.
+    static PANIC_SENDER: std::cell::RefCell<Option<Box<dyn FnOnce(String) + Send>>> = const { std::cell::RefCell::new(None) };
 }
 
 use std::sync::Once;
@@ -655,7 +659,7 @@ impl std::error::Error for AccessError {}
 
 /// A handle to a thread.
 pub struct JoinHandle<T> {
-    receiver: wasm_safe_mutex::mpsc::Receiver<T>,
+    receiver: wasm_safe_mutex::mpsc::Receiver<Result<T, String>>,
     thread: Thread,
     finished: Arc<AtomicBool>,
     /// Pointer to exit_state: [exit_code: u32, ref_count: u32] in wasm linear memory.
@@ -671,15 +675,18 @@ impl<T> JoinHandle<T> {
         }
         self.receiver
             .recv_sync()
-            .map_err(|e| Box::new(format!("{:?}", e)) as Box<String>)
+            .map_err(|e| Box::new(format!("{:?}", e)) as Box<String>)?
+            .map_err(|e| Box::new(e) as Box<String>)
     }
 
     pub async fn join_async(self) -> Result<T, Box<String>> {
         // First get the return value from the channel
+        // The channel sends Result<T, String> to support panic propagation
         let result = self.receiver
             .recv_async()
             .await
-            .map_err(|e| Box::new(format!("{:?}", e)) as Box<String>)?;
+            .map_err(|e| Box::new(format!("{:?}", e)) as Box<String>)?
+            .map_err(|e| Box::new(e) as Box<String>)?;
 
         // Then wait for the worker to actually exit
         let exit_code = wasm_bindgen_futures::JsFuture::from(wait_for_exit_async(&wasm_bindgen::memory(), self.exit_state_ptr))
@@ -842,13 +849,51 @@ impl Builder {
                 *cell.borrow_mut() = Some(thread_for_worker);
             });
 
+            // Set up panic handling: store a sender closure that the panic hook can use
+            // to send the error through the channel before aborting
+            PANIC_SENDER.with(|cell| {
+                let send_clone = send.clone();
+                let finished_clone = finished_for_worker.clone();
+                *cell.borrow_mut() = Some(Box::new(move |msg: String| {
+                    finished_clone.store(true, Ordering::Release);
+                    let _ = send_clone.send_sync(Err(msg));
+                }));
+            });
+
+            // Set a panic hook that sends the error through PANIC_SENDER
+            // We chain with the previous hook so that panics on other threads
+            // (like the main thread) still work correctly
+            let prev_hook = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                let msg = info.to_string();
+                let sent = PANIC_SENDER.with(|cell| {
+                    if let Some(sender) = cell.borrow_mut().take() {
+                        sender(msg);
+                        true
+                    } else {
+                        false
+                    }
+                });
+                // If we didn't have a PANIC_SENDER (e.g., panic on main thread),
+                // call the previous hook
+                if !sent {
+                    prev_hook(info);
+                }
+            }));
+
             crate::hooks::run_spawn_hooks();
 
             let result = f();
+
+            // Clear panic sender since we completed successfully
+            PANIC_SENDER.with(|cell| {
+                cell.borrow_mut().take();
+            });
+
             // Mark as finished before sending result (Release pairs with Acquire in is_finished)
             finished_for_worker.store(true, Ordering::Release);
             // Ignore send errors - receiver may have been dropped if JoinHandle wasn't joined
-            let _ = send.send_sync(result);
+            let _ = send.send_sync(Ok(result));
         };
 
         // Double-box to get a thin pointer (Box<dyn FnOnce()> is a fat pointer)

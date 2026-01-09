@@ -3,7 +3,7 @@
 build-std = ["std", "panic_abort"]
 
 [target.'cfg(target_arch="wasm32")']
-runner = "wasm-server-runner"
+runner = "wasm-bindgen-test-runner"
 rustflags = [
     "-C", "target-feature=+atomics",
     # see https://github.com/rustwasm/wasm-bindgen/issues/4727
@@ -21,6 +21,3 @@ rustflags = [
     "-Csymbol-mangling-version=legacy",
     "-Zunstable-options"
 ]
-
-[target.'cfg(test)']
-runner = "test_runner"

@@ -762,4 +762,15 @@ mod tests {
         }
     }
 
+    // Test that panics in spawned threads propagate to join_async as errors
+    async_test! {
+        async fn test_thread_panic_propagates() {
+            let handle = spawn(|| {
+                panic!("test panic from thread!");
+            });
+            let result = handle.join_async().await;
+            assert!(result.is_err(), "join_async should return Err when thread panics");
+        }
+    }
+
 }
