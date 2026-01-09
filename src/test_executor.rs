@@ -1,12 +1,6 @@
-#[cfg(not(target_arch="wasm32"))]
 use std::future::Future;
-#[cfg(not(target_arch="wasm32"))]
 use std::pin::pin;
-#[cfg(not(target_arch="wasm32"))]
-
-use std::task::{Context, Poll, RawWaker, Waker};
-#[cfg(not(target_arch="wasm32"))]
-use std::task::RawWakerVTable;
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 #[macro_export]
 macro_rules! async_test {
@@ -23,7 +17,6 @@ macro_rules! async_test {
     };
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
     |_| RawWaker::new(std::ptr::null(), &NOOP_WAKER_VTABLE),
     |_| (),
@@ -31,17 +24,16 @@ static NOOP_WAKER_VTABLE: RawWakerVTable = RawWakerVTable::new(
     |_| (),
 );
 
-
-
 //this is the world's worst 'executor'
-#[cfg(not(target_arch = "wasm32"))]
 pub fn spawn<F: Future>(future: F) -> F::Output {
     let mut f = pin!(future);
     let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &NOOP_WAKER_VTABLE)) };
     let mut cx = Context::from_waker(&waker);
     loop {
         match f.as_mut().poll(&mut cx) {
-            Poll::Pending => { std::thread::yield_now(); },
+            Poll::Pending => {
+                crate::yield_now();
+            },
             Poll::Ready(r) => { return r; }
         }
     }

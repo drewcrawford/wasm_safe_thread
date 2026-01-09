@@ -87,6 +87,8 @@
 //! });
 //!
 //! // In async context, use join_async (works on both native and wasm)
+//! # #[cfg(target_arch = "wasm32")]
+//! # wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 //! # wasm_safe_thread::test_executor::spawn(async {
 //! let result = handle.join_async().await.unwrap();
 //! assert_eq!(result, 42);
@@ -115,6 +117,8 @@
 //! ```
 //! # use wasm_safe_thread::spawn;
 //! # let handle = spawn(|| 42);
+//! # #[cfg(target_arch = "wasm32")]
+//! # wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 //! # wasm_safe_thread::test_executor::spawn(async {
 //! // From async context (recommended, works everywhere)
 //! let result = handle.join_async().await.unwrap();
@@ -168,6 +172,8 @@
 //! use wasm_safe_thread::yield_to_event_loop_async;
 //!
 //! // Yield to browser event loop (works on native too)
+//! # #[cfg(target_arch = "wasm32")]
+//! # wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 //! # wasm_safe_thread::test_executor::spawn(async {
 //! yield_to_event_loop_async().await;
 //! # });
