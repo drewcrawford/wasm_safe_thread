@@ -2,6 +2,16 @@
 name = "wasm_safe_thread"
 version = "0.1.0"
 edition = "2024"
+authors = ["Drew Crawford <drew@sealedabstract.com>"]
+description = "A `std::thread` replacement for wasm with proper async integration."
+repository = "https://github.com/drewcrawford/wasm_safe_thread"
+homepage = "https://sealedabstract.com/code/wasm_safe_thread"
+license = "MIT OR Apache-2.0"
+keywords = ["thread", "spawn", "wasm", "parallel", "concurrency"]
+categories = ["api-bindings", "asynchronous", "concurrency", "wasm", "web-programming"]
+exclude = [".*"]
+rust-version = "1.85.1"
+
 
 [dependencies]
 wasm-bindgen = "0.2.106"
