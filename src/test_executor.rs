@@ -89,5 +89,6 @@ where
     });
 
     // Block waiting for the result (uses Atomics.wait in worker context)
-    rx.recv_sync().expect("worker thread panicked or was terminated")
+    rx.recv_sync()
+        .expect("worker thread panicked or was terminated")
 }

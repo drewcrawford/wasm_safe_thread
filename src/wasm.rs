@@ -3,8 +3,8 @@
 use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 static THREAD_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -19,8 +19,8 @@ std::thread_local! {
 
 use std::sync::Once;
 
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures;
 
 /// Ensures handlers are registered exactly once.
@@ -51,8 +51,7 @@ fn wasm_free_exit_state(exit_state_ptr: u32) {
     }
 }
 
-#[wasm_bindgen(
-    inline_js = r#"
+#[wasm_bindgen(inline_js = r#"
 const SELF_URL = import.meta.url;
 
 // Global cleanup handler, registered once from Rust via register_cleanup_handler()
@@ -355,11 +354,17 @@ export function wait_for_exit_async(memory, ptr) {
     poll();
   });
 }
-"#
-)]
+"#)]
 extern "C" {
     fn register_cleanup_handler(handler: &JsValue);
-    fn wasm_safe_thread_spawn_worker(work: JsValue, module: JsValue, memory: JsValue, name: &str, shim_name: &str, exit_state_ptr: u32) -> WorkerLike;
+    fn wasm_safe_thread_spawn_worker(
+        work: JsValue,
+        module: JsValue,
+        memory: JsValue,
+        name: &str,
+        shim_name: &str,
+        exit_state_ptr: u32,
+    ) -> WorkerLike;
     fn get_shim_url_for_testing(shim_name: &str) -> String;
     fn get_detected_shim_url() -> Option<String>;
     fn get_performance_resources_debug() -> String;
@@ -374,8 +379,7 @@ extern "C" {
     fn terminate(this: &WorkerLike);
 }
 
-#[wasm_bindgen(
-    inline_js = r#"
+#[wasm_bindgen(inline_js = r#"
 export function is_node() {
   return typeof process !== "undefined" &&
     process?.versions?.node != null &&
@@ -531,8 +535,7 @@ export function get_available_parallelism() {
   // Unknown environment
   return 1;
 }
-"#
-)]
+"#)]
 extern "C" {
     fn is_node() -> bool;
     fn is_main_thread() -> bool;
@@ -578,7 +581,12 @@ impl WorkerHandle {
 /// * `name` - Worker name for debugging
 /// * `shim_name` - The wasm-bindgen shim name
 /// * `exit_state_ptr` - Pointer to exit state atomic (0=running, 1=success, 2=error)
-pub fn spawn_with_shared_module(work: JsValue, name: &str, shim_name: &str, exit_state_ptr: u32) -> WorkerHandle {
+pub fn spawn_with_shared_module(
+    work: JsValue,
+    name: &str,
+    shim_name: &str,
+    exit_state_ptr: u32,
+) -> WorkerHandle {
     // Ensure handlers are registered with JS (one-time setup)
     init_handlers();
 
@@ -676,7 +684,9 @@ pub struct JoinHandle<T> {
 impl<T> JoinHandle<T> {
     pub fn join(self) -> Result<T, Box<String>> {
         if is_main_thread() {
-            return Err(Box::new("Can't join from the main thread on wasm32".to_string()))
+            return Err(Box::new(
+                "Can't join from the main thread on wasm32".to_string(),
+            ));
         }
         self.receiver
             .recv_sync()
@@ -687,16 +697,20 @@ impl<T> JoinHandle<T> {
     pub async fn join_async(self) -> Result<T, Box<String>> {
         // First get the return value from the channel
         // The channel sends Result<T, String> to support panic propagation
-        let result = self.receiver
+        let result = self
+            .receiver
             .recv_async()
             .await
             .map_err(|e| Box::new(format!("{:?}", e)) as Box<String>)?
             .map_err(|e| Box::new(e) as Box<String>)?;
 
         // Then wait for the worker to actually exit
-        let exit_code = wasm_bindgen_futures::JsFuture::from(wait_for_exit_async(&wasm_bindgen::memory(), self.exit_state_ptr))
-            .await
-            .map_err(|e| Box::new(format!("Worker exit error: {:?}", e)) as Box<String>)?;
+        let exit_code = wasm_bindgen_futures::JsFuture::from(wait_for_exit_async(
+            &wasm_bindgen::memory(),
+            self.exit_state_ptr,
+        ))
+        .await
+        .map_err(|e| Box::new(format!("Worker exit error: {:?}", e)) as Box<String>)?;
 
         // Check exit code (1 = success, 2 = error)
         let code = exit_code.as_f64().unwrap_or(0.0) as u32;
@@ -727,7 +741,9 @@ impl<T> Drop for JoinHandle<T> {
         let old_ref_count = unsafe { (*ptr)[1].fetch_sub(1, Ordering::AcqRel) };
         if old_ref_count == 1 {
             // We decremented from 1 to 0, we're the last reference - free the memory
-            unsafe { drop(Box::from_raw(ptr)); }
+            unsafe {
+                drop(Box::from_raw(ptr));
+            }
         }
     }
 }
@@ -834,9 +850,9 @@ impl Builder {
         };
 
         // Worker name: use explicit name or generate a default for JS devtools
-        let worker_name = self._name.unwrap_or_else(|| {
-            format!("wasm_safe_thread {}", id.0)
-        });
+        let worker_name = self
+            ._name
+            .unwrap_or_else(|| format!("wasm_safe_thread {}", id.0));
         let thread_for_worker = thread.clone();
 
         let finished = Arc::new(AtomicBool::new(false));
@@ -913,7 +929,8 @@ impl Builder {
 
         // Spawn the worker. The WorkerHandle is not needed after spawn -
         // the worker runs independently and signals completion via exit_state.
-        let _worker_handle = spawn_with_shared_module(work, &worker_name, shim_name, exit_state_ptr);
+        let _worker_handle =
+            spawn_with_shared_module(work, &worker_name, shim_name, exit_state_ptr);
 
         Ok(JoinHandle {
             receiver: recv,
@@ -983,7 +1000,9 @@ pub fn yield_now() {
 /// This is necessary when spawning workers from within workers, as the child worker
 /// won't start executing until the parent yields to the event loop.
 pub async fn yield_to_event_loop_async() {
-    let _: JsValue = wasm_bindgen_futures::JsFuture::from(yield_to_event_loop()).await.unwrap();
+    let _: JsValue = wasm_bindgen_futures::JsFuture::from(yield_to_event_loop())
+        .await
+        .unwrap();
 }
 
 pub fn park() {
@@ -1010,12 +1029,15 @@ pub fn park_timeout(dur: Duration) {
 pub fn available_parallelism() -> io::Result<NonZeroUsize> {
     let count = get_available_parallelism();
     NonZeroUsize::new(count as usize).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::NotFound, "could not determine available parallelism")
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "could not determine available parallelism",
+        )
     })
 }
 
-
-#[cfg(test)] mod tests {
+#[cfg(test)]
+mod tests {
     use super::*;
 
     #[wasm_bindgen_test::wasm_bindgen_test]

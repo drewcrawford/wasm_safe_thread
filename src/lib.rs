@@ -266,13 +266,13 @@
 
 extern crate alloc;
 
+mod hooks;
 #[cfg(not(target_arch = "wasm32"))]
 mod stdlib;
-#[cfg(target_arch = "wasm32")]
-mod wasm;
-mod hooks;
 #[doc(hidden)]
 pub mod test_executor;
+#[cfg(target_arch = "wasm32")]
+mod wasm;
 
 #[cfg(not(target_arch = "wasm32"))]
 use stdlib as backend;
@@ -283,9 +283,9 @@ use std::io;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
+pub use backend::yield_to_event_loop_async;
 pub use backend::{AccessError, Builder, JoinHandle, LocalKey, Thread, ThreadId};
 pub use hooks::{clear_spawn_hooks, register_spawn_hook, remove_spawn_hook};
-pub use backend::yield_to_event_loop_async;
 
 /// Declare a new thread local storage key of type [`LocalKey`].
 ///
@@ -408,22 +408,22 @@ mod tests {
     }
 
     // try join from bg thread
-        crate::async_test! {
-            async fn join_bg() {
+    crate::async_test! {
+        async fn join_bg() {
 
-                let handle = Builder::new()
-                        .name("join me".to_string())
-                        .spawn(|| {})
-                        .unwrap();
+            let handle = Builder::new()
+                    .name("join me".to_string())
+                    .spawn(|| {})
+                    .unwrap();
 
-                let bg = Builder::new()
-                .name("joining".to_string())
-            .spawn(|| {
-                handle.join().unwrap();
-            }).unwrap();
-            bg.join_async().await.unwrap();
-            }
+            let bg = Builder::new()
+            .name("joining".to_string())
+        .spawn(|| {
+            handle.join().unwrap();
+        }).unwrap();
+        bg.join_async().await.unwrap();
         }
+    }
 
     async_test! {
         async fn test_spawn_and_join_async() {
@@ -432,8 +432,6 @@ mod tests {
             assert_eq!(result, 42);
         }
     }
-
-
 
     async_test! {
         async fn test_builder() {
@@ -445,7 +443,6 @@ mod tests {
             assert_eq!(result, "hello");
         }
     }
-
 
     #[test]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
@@ -499,7 +496,6 @@ mod tests {
         }
     }
 
-
     #[test]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     fn test_sleep() {
@@ -511,7 +507,11 @@ mod tests {
         let start = Instant::now();
         sleep(Duration::from_millis(50));
         let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(50), "sleep should wait at least 50ms, but only waited {:?}", elapsed);
+        assert!(
+            elapsed >= Duration::from_millis(50),
+            "sleep should wait at least 50ms, but only waited {:?}",
+            elapsed
+        );
     }
 
     crate::async_test! {
@@ -1042,5 +1042,4 @@ mod tests {
             assert!(result.is_err(), "join_async should return Err when thread panics");
         }
     }
-
 }

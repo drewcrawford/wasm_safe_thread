@@ -3,7 +3,7 @@
 use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::thread;
 use std::time::Duration;
 use wasm_safe_mutex::mpsc;
@@ -68,10 +68,15 @@ impl<T> JoinHandle<T> {
     /// Waits for the thread to finish and returns its result.
     pub fn join(self) -> Result<T, Box<dyn std::any::Any + Send + 'static>> {
         // The thread always sends a result before exiting, so this should never fail
-        self.receiver.recv_sync().expect("thread terminated without sending result")
+        self.receiver
+            .recv_sync()
+            .expect("thread terminated without sending result")
     }
 
-    pub async fn join_async(self) -> Result<T, Box<String>> where T: Send + 'static {
+    pub async fn join_async(self) -> Result<T, Box<String>>
+    where
+        T: Send + 'static,
+    {
         self.receiver
             .recv_async()
             .await
@@ -153,7 +158,11 @@ impl Builder {
             let _ = sender.send_sync(result);
         })?;
         let thread = Thread(std_handle.thread().clone());
-        Ok(JoinHandle { std_handle, receiver, thread })
+        Ok(JoinHandle {
+            std_handle,
+            receiver,
+            thread,
+        })
     }
 }
 
@@ -176,7 +185,11 @@ where
         let _ = sender.send_sync(result);
     });
     let thread = Thread(std_handle.thread().clone());
-    JoinHandle { std_handle, receiver, thread }
+    JoinHandle {
+        std_handle,
+        receiver,
+        thread,
+    }
 }
 
 /// Gets a handle to the thread that invokes it.
@@ -218,7 +231,10 @@ struct YieldOnce {
 impl std::future::Future for YieldOnce {
     type Output = ();
 
-    fn poll(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
         if self.yielded {
             std::task::Poll::Ready(())
         } else {
