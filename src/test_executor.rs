@@ -40,7 +40,7 @@ macro_rules! async_test {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn spawn<F, T>(future: F) -> T
 where
-    F: Future<Output = T> + Send + 'static,
+    F: Future<Output = T>,
     T: Send + 'static,
 {
     use std::pin::pin;
