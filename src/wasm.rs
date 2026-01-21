@@ -9,19 +9,21 @@ use std::time::Duration;
 
 static THREAD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Type alias for the panic sender closure stored in thread-local storage.
+type PanicSender = Box<dyn FnOnce(String) + Send>;
+
 std::thread_local! {
     static CURRENT_THREAD: std::cell::RefCell<Option<Thread>> = const { std::cell::RefCell::new(None) };
 
     /// Holds a closure that sends a panic error through the channel.
     /// This is set before running user code and called from the panic hook.
-    static PANIC_SENDER: std::cell::RefCell<Option<Box<dyn FnOnce(String) + Send>>> = const { std::cell::RefCell::new(None) };
+    static PANIC_SENDER: std::cell::RefCell<Option<PanicSender>> = const { std::cell::RefCell::new(None) };
 }
 
 use std::sync::Once;
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
-use wasm_bindgen_futures;
 
 /// Ensures handlers are registered exactly once.
 static INIT_HANDLERS: Once = Once::new();
