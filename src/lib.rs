@@ -78,6 +78,8 @@
 //! Replace `use std::thread` with `use wasm_safe_thread as thread`:
 //!
 //! ```
+//! # #[cfg(target_arch = "wasm32")]
+//! # wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 //! use wasm_safe_thread as thread;
 //!
 //! // Spawn a thread
@@ -86,13 +88,9 @@
 //!     42
 //! });
 //!
-//! // In async context, use join_async (works on both native and wasm)
-//! # #[cfg(target_arch = "wasm32")]
-//! # wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
-//! # wasm_safe_thread::test_executor::spawn(async {
-//! let result = handle.join_async().await.unwrap();
+//! // Wait for the thread to complete
+//! let result = handle.join().unwrap();
 //! assert_eq!(result, 42);
-//! # });
 //! ```
 //!
 //! # API
@@ -115,24 +113,28 @@
 //! ## Joining threads
 //!
 //! ```
-//! # use wasm_safe_thread::spawn;
-//! # let handle = spawn(|| 42);
 //! # #[cfg(target_arch = "wasm32")]
 //! # wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
-//! # wasm_safe_thread::test_executor::spawn(async {
-//! // From async context (recommended, works everywhere)
-//! let result = handle.join_async().await.unwrap();
-//! # assert_eq!(result, 42);
-//! # });
-//! # let handle = spawn(|| 42);
-//! // From background thread only (panics on wasm main thread)
+//! use wasm_safe_thread::spawn;
+//!
+//! // Synchronous join (works on native and wasm worker threads)
+//! let handle = spawn(|| 42);
 //! let result = handle.join().unwrap();
+//! assert_eq!(result, 42);
 //!
 //! // Non-blocking check
-//! # let handle = spawn(|| 42);
+//! let handle = spawn(|| 42);
 //! if handle.is_finished() {
 //!     // Thread completed
 //! }
+//! # drop(handle);
+//! ```
+//!
+//! For async contexts, use `join_async`:
+//!
+//! ```compile_only
+//! // In an async context (e.g., with wasm_bindgen_futures::spawn_local)
+//! let result = handle.join_async().await.unwrap();
 //! ```
 //!
 //! ## Thread operations
@@ -155,6 +157,8 @@
 //! Park/unpark works from background threads:
 //!
 //! ```
+//! # #[cfg(target_arch = "wasm32")]
+//! # wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 //! use wasm_safe_thread::{spawn, park, park_timeout};
 //! use std::time::Duration;
 //!
@@ -163,20 +167,23 @@
 //!     park_timeout(Duration::from_millis(10)); // Wait with timeout
 //! });
 //! handle.thread().unpark();  // Wake parked thread
-//! handle.join().unwrap();
+//! handle.join().unwrap();  // join() requires worker context on wasm
 //! ```
 //!
 //! ## Event loop integration
 //!
 //! ```
+//! # #[cfg(not(target_arch = "wasm32"))]
+//! # fn main() {
 //! use wasm_safe_thread::yield_to_event_loop_async;
 //!
 //! // Yield to browser event loop (works on native too)
-//! # #[cfg(target_arch = "wasm32")]
-//! # wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
 //! # wasm_safe_thread::test_executor::spawn(async {
 //! yield_to_event_loop_async().await;
 //! # });
+//! # }
+//! # #[cfg(target_arch = "wasm32")]
+//! # fn main() {} // JsFuture is !Send, tested separately via wasm_bindgen_test
 //! ```
 //!
 //! ## Thread local storage
@@ -389,9 +396,11 @@ where
 mod tests {
     use super::*;
 
+    // On wasm32, join() panics on the main thread (Atomics.wait unavailable).
+    // This produces "RuntimeError: unreachable" in console - expected for wasm panics.
     #[test]
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
-    #[cfg_attr(target_arch = "wasm32", should_panic)] //can't join from the main thread
+    #[cfg_attr(target_arch = "wasm32", should_panic)]
     fn test_spawn_and_join() {
         let handle = spawn(|| 42);
         let result = handle.join().unwrap();
@@ -1020,7 +1029,10 @@ mod tests {
         }
     }
 
-    // Test that panics in spawned threads propagate to join_async as errors
+    // Test that panics in spawned threads propagate to join_async as errors.
+    // Note: On wasm32, this test produces "RuntimeError: unreachable" in the console output.
+    // This is expected - wasm panics trigger an abort which manifests as this error.
+    // The test still passes because the panic is caught and returned as an Err.
     async_test! {
         async fn test_thread_panic_propagates() {
             let handle = spawn(|| {

@@ -29,8 +29,8 @@ console_error_panic_hook = "0.1.7"
 
 [patch.crates-io]
 
-# wasm-bindgen = {path = "../wasm_ffi"}
-# wasm-bindgen-test = {path = "../wasm_ffi/crates/test"}
-# wasm-bindgen-futures = {path = "../wasm_ffi/crates/futures"}
-# js-sys = {path = "../wasm_ffi/crates/js-sys"}
-# web-sys = {path = "../wasm_ffi/crates/web-sys"}
+wasm-bindgen = {path = "../wasm_ffi"}
+wasm-bindgen-test = {path = "../wasm_ffi/crates/test"}
+wasm-bindgen-futures = {path = "../wasm_ffi/crates/futures"}
+js-sys = {path = "../wasm_ffi/crates/js-sys"}
+web-sys = {path = "../wasm_ffi/crates/web-sys"}

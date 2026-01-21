@@ -281,33 +281,38 @@ export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimNa
     };
   }
 
-  // Node: use worker_threads
+  // Node: use worker_threads (synchronous creation is critical!)
+  // If we use an async IIFE, the caller might enter an Atomics.wait loop before
+  // the Worker is created, blocking the event loop and preventing the promise from resolving.
   if (isNode()) {
-    const ready = (async () => {
-      const { Worker } = await import("node:worker_threads");
-      const src = makeNodeWorkerScript(shimUrl, entryName);
-      const w = new Worker(src, { eval: true, type: "module", name });
+    // Use process.getBuiltinModule for synchronous import (Node.js 20+)
+    const wt = process.getBuiltinModule
+      ? process.getBuiltinModule("node:worker_threads")
+      : null;
+    if (!wt) throw new Error("worker_threads not available - need Node.js 20+ for synchronous import");
+    const { Worker } = wt;
 
-      // Note: Both 'error' and 'exit' events fire when a worker throws.
-      // We only handle signaling and cleanup in 'exit' to avoid double-decrement of ref_count.
-      // The exit code is non-zero when an error occurred.
-      w.on('exit', (code) => {
-        signalExit(memory, exitStatePtr, code === 0 ? 1 : 2);
-        decrementRefCountAndCleanup(memory, exitStatePtr);
-      });
-      w.on('error', (e) => {
-        // Log error for debugging, but don't signal/cleanup here.
-        // The 'exit' event always follows and handles cleanup.
-        console.error("Worker error:", e);
-      });
+    const src = makeNodeWorkerScript(shimUrl, entryName);
+    const w = new Worker(src, { eval: true, type: "module", name });
 
-      w.postMessage([module, memory, work]);
-      return w;
-    })();
+    // Note: Both 'error' and 'exit' events fire when a worker throws.
+    // We only handle signaling and cleanup in 'exit' to avoid double-decrement of ref_count.
+    // The exit code is non-zero when an error occurred.
+    w.on('exit', (code) => {
+      signalExit(memory, exitStatePtr, code === 0 ? 1 : 2);
+      decrementRefCountAndCleanup(memory, exitStatePtr);
+    });
+    w.on('error', (e) => {
+      // Log error for debugging, but don't signal/cleanup here.
+      // The 'exit' event always follows and handles cleanup.
+      console.error("Worker error:", e);
+    });
+
+    w.postMessage([module, memory, work]);
 
     return {
-      postMessage: (msg) => ready.then(w => w.postMessage(msg)),
-      terminate: () => ready.then(w => w.terminate()),
+      postMessage: (msg) => w.postMessage(msg),
+      terminate: () => w.terminate(),
     };
   }
 
@@ -801,9 +806,11 @@ impl Builder {
     ///
     /// You must yield to the event loop to allow the worker to begin:
     ///
-    /// ```ignore
-    /// let handle = Builder::new().spawn(|| { /* ... */ }).unwrap();
-    /// yield_to_event_loop_async().await;  // Worker starts here, not above!
+    /// ```
+    /// let handle = wasm_safe_thread::Builder::new().spawn(|| { /* ... */ }).unwrap();
+    /// # async fn ex() {
+    /// wasm_safe_thread::yield_to_event_loop_async().await;  // Worker starts here, not above!
+    /// # }
     /// ```
     ///
     /// Failure to yield can cause:
@@ -1068,8 +1075,8 @@ pub fn available_parallelism() -> io::Result<NonZeroUsize> {
         park_timeout(Duration::from_millis(1));
     }
 
-    // Test that park panics on browser main thread
-    // This test only runs in browser and expects a panic
+    // Test that park panics on browser main thread (Atomics.wait unavailable there).
+    // This produces "RuntimeError: unreachable" in console - expected for wasm panics.
     #[wasm_bindgen_test::wasm_bindgen_test]
     #[should_panic(expected = "Atomics.wait is not available")]
     fn test_park_panics_on_browser_main_thread() {
