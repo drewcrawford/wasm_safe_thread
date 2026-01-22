@@ -285,6 +285,7 @@ use std::time::Duration;
 
 pub use backend::yield_to_event_loop_async;
 pub use backend::{AccessError, Builder, JoinHandle, LocalKey, Thread, ThreadId};
+pub use backend::{task_begin, task_finished};
 pub use hooks::{clear_spawn_hooks, register_spawn_hook, remove_spawn_hook};
 
 /// Declare a new thread local storage key of type [`LocalKey`].

@@ -18,6 +18,10 @@ std::thread_local! {
     /// Holds a closure that sends a panic error through the channel.
     /// This is set before running user code and called from the panic hook.
     static PANIC_SENDER: std::cell::RefCell<Option<PanicSender>> = const { std::cell::RefCell::new(None) };
+
+    /// Tracks pending async tasks spawned on this thread.
+    /// The worker will wait for this to reach 0 before exiting.
+    static PENDING_TASKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 use std::sync::Once;
@@ -183,6 +187,12 @@ function makeBrowserWorkerScript(shimUrl, entryName) {
         // Call the entry point
         shim[${JSON.stringify(entryName)}](work);
 
+        // Wait for pending async tasks to complete before exiting.
+        // Tasks are tracked via task_begin()/task_finished() calls.
+        while (shim.wasm_safe_thread_pending_tasks() > 0) {
+          await new Promise(resolve => setTimeout(resolve, 1));
+        }
+
         // Signal exit before closing (browsers have no 'exit' event)
         self.postMessage({ __wasm_safe_thread_exit: true });
         close();
@@ -203,6 +213,9 @@ function makeNodeWorkerScript(shimUrl, entryName) {
     // Cache-bust to get fresh module state per worker
     const url = ${JSON.stringify(shimUrl)} + '?worker=' + threadId;
 
+    // Helper to wait ms milliseconds
+    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
     parentPort.on("message", async (msg) => {
       try {
         const [module, memory, work] = msg;
@@ -220,6 +233,16 @@ function makeNodeWorkerScript(shimUrl, entryName) {
         if (!entry) throw new Error("No entry point found: " + ${JSON.stringify(entryName)});
 
         entry(work);
+
+        // Wait for pending async tasks to complete before exiting.
+        // Tasks are tracked via task_begin()/task_finished() calls.
+        const pendingTasks = shim.wasm_safe_thread_pending_tasks || shim.default?.wasm_safe_thread_pending_tasks;
+        if (pendingTasks) {
+          while (pendingTasks() > 0) {
+            await sleep(1);
+          }
+        }
+
         parentPort.close();
       } catch (err) {
         console.error(err);
@@ -1036,6 +1059,47 @@ pub fn available_parallelism() -> io::Result<NonZeroUsize> {
             "could not determine available parallelism",
         )
     })
+}
+
+/// Call before spawning an async task (e.g., with `wasm_bindgen_futures::spawn_local`).
+///
+/// The worker will wait for all tasks to complete before exiting. Each call to
+/// `task_begin` must be paired with a call to [`task_finished`] when the task completes.
+///
+/// # Example
+///
+/// ```ignore
+/// wasm_safe_thread::task_begin();
+/// wasm_bindgen_futures::spawn_local(async {
+///     // ... async work ...
+///     wasm_safe_thread::task_finished();
+/// });
+/// ```
+pub fn task_begin() {
+    PENDING_TASKS.with(|c| c.set(c.get() + 1));
+}
+
+/// Call when an async task completes.
+///
+/// Must be paired with a prior call to [`task_begin`].
+pub fn task_finished() {
+    PENDING_TASKS.with(|c| {
+        let current = c.get();
+        debug_assert!(
+            current > 0,
+            "task_finished called without matching task_begin"
+        );
+        c.set(current - 1);
+    });
+}
+
+/// Returns the number of pending async tasks.
+///
+/// This is exported for use by the worker's JavaScript code to wait for
+/// all tasks to complete before closing.
+#[wasm_bindgen]
+pub fn wasm_safe_thread_pending_tasks() -> u32 {
+    PENDING_TASKS.with(|c| c.get())
 }
 
 #[cfg(test)]

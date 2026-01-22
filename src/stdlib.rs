@@ -253,3 +253,16 @@ impl std::future::Future for YieldOnce {
 pub async fn yield_to_event_loop_async() {
     YieldOnce { yielded: false }.await
 }
+
+/// No-op on native - async task tracking is only needed on WASM.
+///
+/// On WASM, this increments a pending task counter that the worker waits for
+/// before exiting. On native, threads don't have this issue.
+#[inline]
+pub fn task_begin() {}
+
+/// No-op on native - async task tracking is only needed on WASM.
+///
+/// On WASM, this decrements the pending task counter.
+#[inline]
+pub fn task_finished() {}
