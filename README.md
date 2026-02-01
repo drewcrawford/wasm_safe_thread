@@ -1,5 +1,8 @@
 # wasm_safe_thread
 
+
+![logo](art/logo.png)
+
 A `std::thread` replacement for wasm32 with proper async integration.
 
 This crate provides a unified threading API that works across both WebAssembly and native platforms. Unlike similar crates, it's designed from the ground up to handle the async realities of browser environments.
