@@ -2,6 +2,31 @@
 
 use super::*;
 
+// Compile-time assertions for auto-traits (Send/Sync).
+// These are critical guarantees for a threading library.
+fn _assert_send<T: Send>() {}
+fn _assert_sync<T: Sync>() {}
+
+fn _auto_trait_assertions() {
+    // Thread handle must be Send + Sync so it can be shared across threads
+    _assert_send::<Thread>();
+    _assert_sync::<Thread>();
+
+    // ThreadId must be Send + Sync for use across threads
+    _assert_send::<ThreadId>();
+    _assert_sync::<ThreadId>();
+
+    // AccessError must be Send + Sync for error propagation across threads
+    _assert_send::<AccessError>();
+    _assert_sync::<AccessError>();
+
+    // Builder must be Send so it can be moved to another thread before spawning
+    _assert_send::<Builder>();
+
+    // JoinHandle must be Send so the handle can be moved to another thread for joining
+    _assert_send::<JoinHandle<()>>();
+}
+
 // On wasm32, join() panics on the main thread (Atomics.wait unavailable).
 // This produces "RuntimeError: unreachable" in console - expected for wasm panics.
 #[test]

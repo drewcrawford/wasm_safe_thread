@@ -10,9 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
 use wasm_utils::{
-    atomics_wait_timeout_ms_try, get_available_parallelism, is_main_thread,
-    park_notify_at_addr, park_wait_at_addr, park_wait_timeout_at_addr, sleep_sync_ms,
-    yield_to_event_loop,
+    atomics_wait_timeout_ms_try, get_available_parallelism, is_main_thread, park_notify_at_addr,
+    park_wait_at_addr, park_wait_timeout_at_addr, sleep_sync_ms, yield_to_event_loop,
 };
 
 static THREAD_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -512,7 +511,8 @@ impl<T: 'static> fmt::Debug for LocalKey<T> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// An error returned by [`LocalKey::try_with`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AccessError;
 
 impl fmt::Display for AccessError {
@@ -534,7 +534,16 @@ pub struct JoinHandle<T> {
     exit_state_ptr: u32,
 }
 
+impl<T> fmt::Debug for JoinHandle<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JoinHandle")
+            .field("thread", &self.thread)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T> JoinHandle<T> {
+    /// Waits for the thread to finish and returns its result.
     pub fn join(self) -> Result<T, Box<String>> {
         if is_main_thread() {
             return Err(Box::new(
@@ -547,6 +556,11 @@ impl<T> JoinHandle<T> {
             .map_err(|e| Box::new(e) as Box<String>)
     }
 
+    /// Waits asynchronously for the thread to finish and returns its result.
+    ///
+    /// This is the async version of [`JoinHandle::join`]. The error type differs
+    /// from the synchronous version - panics are converted to `Box<String>` containing
+    /// the debug representation of the panic payload.
     pub async fn join_async(self) -> Result<T, Box<String>> {
         // First get the return value from the channel
         // The channel sends Result<T, String> to support panic propagation
@@ -575,10 +589,12 @@ impl<T> JoinHandle<T> {
         // Note: Drop impl will decrement ref_count and potentially free exit_state
     }
 
+    /// Gets the thread associated with this handle.
     pub fn thread(&self) -> &Thread {
         &self.thread
     }
 
+    /// Checks if the thread has finished running.
     pub fn is_finished(&self) -> bool {
         self.finished.load(Ordering::Acquire)
     }
@@ -601,9 +617,33 @@ impl<T> Drop for JoinHandle<T> {
     }
 }
 
+/// A handle to a thread.
 #[derive(Clone)]
 pub struct Thread {
     inner: Arc<ThreadInner>,
+}
+
+impl fmt::Debug for Thread {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Thread")
+            .field("id", &self.inner.id)
+            .field("name", &self.inner.name)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for Thread {
+    fn eq(&self, other: &Self) -> bool {
+        self.id() == other.id()
+    }
+}
+
+impl Eq for Thread {}
+
+impl std::hash::Hash for Thread {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id().hash(state);
+    }
 }
 
 struct ThreadInner {
@@ -615,23 +655,35 @@ struct ThreadInner {
 }
 
 impl Thread {
+    /// Gets the thread's unique identifier.
     pub fn id(&self) -> ThreadId {
         self.inner.id
     }
 
+    /// Gets the thread's name.
     pub fn name(&self) -> Option<&str> {
         self.inner.name.as_deref()
     }
 
+    /// Atomically makes the handle's token available if it is not already.
     pub fn unpark(&self) {
         let ptr = self.inner.parking_state.as_ref() as *const AtomicU32 as u32;
         park_notify_at_addr(&wasm_bindgen::memory(), ptr);
     }
 }
 
+/// A unique identifier for a running thread.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ThreadId(u64);
 
+impl fmt::Display for ThreadId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ThreadId({})", self.0)
+    }
+}
+
+/// A builder for configuring and spawning threads.
+#[derive(Debug)]
 pub struct Builder {
     _name: Option<String>,
     _stack_size: Option<usize>,
@@ -639,6 +691,7 @@ pub struct Builder {
 }
 
 impl Builder {
+    /// Creates a new thread builder.
     pub fn new() -> Self {
         Builder {
             _name: None,
@@ -654,11 +707,13 @@ impl Builder {
         self
     }
 
+    /// Sets the name of the thread.
     pub fn name(mut self, name: String) -> Self {
         self._name = Some(name);
         self
     }
 
+    /// Sets the stack size for the new thread.
     pub fn stack_size(mut self, size: usize) -> Self {
         self._stack_size = Some(size);
         self
@@ -814,6 +869,7 @@ where
     Builder::new().spawn(f).expect("failed to spawn thread")
 }
 
+/// Gets a handle to the thread that invokes it.
 pub fn current() -> Thread {
     CURRENT_THREAD.with(|cell| {
         let mut borrowed = cell.borrow_mut();
@@ -841,10 +897,12 @@ pub fn current() -> Thread {
     })
 }
 
+/// Puts the current thread to sleep for at least the specified duration.
 pub fn sleep(dur: Duration) {
     sleep_sync_ms(dur.as_millis() as f64);
 }
 
+/// Cooperatively gives up a timeslice to the OS scheduler.
 pub fn yield_now() {
     atomics_wait_timeout_ms_try(0.001);
 }
@@ -858,6 +916,7 @@ pub async fn yield_to_event_loop_async() {
         .unwrap();
 }
 
+/// Blocks unless or until the current thread's token is made available.
 pub fn park() {
     let thread = current();
     let ptr = thread.inner.parking_state.as_ref() as *const AtomicU32 as u32;
@@ -868,6 +927,8 @@ pub fn park() {
     }
 }
 
+/// Blocks unless or until the current thread's token is made available
+/// or the specified duration has been reached.
 pub fn park_timeout(dur: Duration) {
     let thread = current();
     let ptr = thread.inner.parking_state.as_ref() as *const AtomicU32 as u32;
@@ -879,6 +940,7 @@ pub fn park_timeout(dur: Duration) {
     }
 }
 
+/// Returns an estimate of the default amount of parallelism a program should use.
 pub fn available_parallelism() -> io::Result<NonZeroUsize> {
     let count = get_available_parallelism();
     NonZeroUsize::new(count as usize).ok_or_else(|| {
@@ -897,6 +959,7 @@ pub fn available_parallelism() -> io::Result<NonZeroUsize> {
 /// # Example
 ///
 /// ```ignore
+/// # // ignore because: wasm_bindgen_futures is not available in doctests
 /// wasm_safe_thread::task_begin();
 /// wasm_bindgen_futures::spawn_local(async {
 ///     // ... async work ...

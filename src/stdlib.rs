@@ -46,7 +46,7 @@ impl<T: 'static> fmt::Debug for LocalKey<T> {
 }
 
 /// An error returned by [`LocalKey::try_with`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AccessError;
 
 impl fmt::Display for AccessError {
@@ -64,6 +64,14 @@ pub struct JoinHandle<T> {
     thread: Thread,
 }
 
+impl<T> fmt::Debug for JoinHandle<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JoinHandle")
+            .field("thread", &self.thread)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T> JoinHandle<T> {
     /// Waits for the thread to finish and returns its result.
     pub fn join(self) -> Result<T, Box<dyn std::any::Any + Send + 'static>> {
@@ -73,6 +81,11 @@ impl<T> JoinHandle<T> {
             .expect("thread terminated without sending result")
     }
 
+    /// Waits asynchronously for the thread to finish and returns its result.
+    ///
+    /// This is the async version of [`JoinHandle::join`]. The error type differs
+    /// from the synchronous version - panics are converted to `Box<String>` containing
+    /// the debug representation of the panic payload.
     pub async fn join_async(self) -> Result<T, Box<String>>
     where
         T: Send + 'static,
@@ -96,8 +109,22 @@ impl<T> JoinHandle<T> {
 }
 
 /// A handle to a thread.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Thread(thread::Thread);
+
+impl PartialEq for Thread {
+    fn eq(&self, other: &Self) -> bool {
+        self.id() == other.id()
+    }
+}
+
+impl Eq for Thread {}
+
+impl std::hash::Hash for Thread {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id().hash(state);
+    }
+}
 
 impl Thread {
     /// Gets the thread's unique identifier.
@@ -120,7 +147,14 @@ impl Thread {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ThreadId(thread::ThreadId);
 
+impl fmt::Display for ThreadId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.0)
+    }
+}
+
 /// A builder for configuring and spawning threads.
+#[derive(Debug)]
 pub struct Builder {
     inner: thread::Builder,
 }

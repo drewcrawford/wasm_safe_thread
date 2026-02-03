@@ -3,7 +3,6 @@
 use super::wasm_utils::is_node;
 use super::*;
 use std::time::Duration;
-use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen_test::wasm_bindgen_test]
 fn test_is_main_thread() {
