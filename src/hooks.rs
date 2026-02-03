@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Global spawn hook registration system.
 //!
 //! Spawn hooks are functions that run at the beginning of every spawned thread,

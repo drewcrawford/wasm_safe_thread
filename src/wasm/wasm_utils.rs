@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! WASM utility functions for environment detection, atomics, and parking.
 
 use wasm_bindgen::prelude::*;

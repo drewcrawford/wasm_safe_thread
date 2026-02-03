@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A `std::thread` replacement for wasm32 with proper async integration.
 //!
 //! ![logo](https://github.com/drewcrawford/wasm_safe_thread/raw/main/art/logo.png)

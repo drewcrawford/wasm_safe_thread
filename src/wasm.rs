@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! WebAssembly backend - placeholder implementation
 
 mod wasm_utils;

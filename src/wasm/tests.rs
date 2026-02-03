@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Tests for WASM backend
 
 use super::wasm_utils::is_node;
