@@ -100,12 +100,15 @@
 //! ## Thread spawning
 //!
 //! ```
-//! use wasm_safe_thread::{spawn, Builder};
+//! use wasm_safe_thread::{spawn, spawn_named, Builder};
 //!
 //! // Simple spawn
 //! let handle = spawn(|| "result");
 //!
-//! // Named thread with builder
+//! // Convenience function for named threads
+//! let handle = spawn_named("my-worker", || "result").unwrap();
+//!
+//! // Builder pattern for more options
 //! let handle = Builder::new()
 //!     .name("my-worker".to_string())
 //!     .spawn(|| "result")
@@ -223,6 +226,24 @@
 //! // Clear all hooks
 //! clear_spawn_hooks();
 //! ```
+//!
+//! ## Async task tracking (WASM)
+//!
+//! When spawning async tasks inside a worker thread using `wasm_bindgen_futures::spawn_local`,
+//! you must notify the runtime so the worker waits for tasks to complete before exiting:
+//!
+//! ```ignore
+//! use wasm_safe_thread::{task_begin, task_finished};
+//!
+//! task_begin();
+//! wasm_bindgen_futures::spawn_local(async {
+//!     // ... async work ...
+//!     task_finished();
+//! });
+//! ```
+//!
+//! These functions are no-ops on native platforms, so you can use them unconditionally
+//! in cross-platform code.
 //!
 //! # WASM Limitations
 //!

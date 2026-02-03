@@ -73,13 +73,6 @@ Both crates provide:
 
 ## Usage
 
-Add to your `Cargo.toml`:
-
-```toml
-[dependencies]
-wasm_safe_thread = "0.1"
-```
-
 Replace `use std::thread` with `use wasm_safe_thread as thread`:
 
 ```rust
@@ -91,8 +84,8 @@ let handle = thread::spawn(|| {
     42
 });
 
-// In async context, use join_async (works on both native and wasm)
-let result = handle.join_async().await.unwrap();
+// Wait for the thread to complete
+let result = handle.join().unwrap();
 assert_eq!(result, 42);
 ```
 
@@ -101,12 +94,15 @@ assert_eq!(result, 42);
 ### Thread spawning
 
 ```rust
-use wasm_safe_thread::{spawn, Builder};
+use wasm_safe_thread::{spawn, spawn_named, Builder};
 
 // Simple spawn
 let handle = spawn(|| "result");
 
-// Named thread with builder
+// Convenience function for named threads
+let handle = spawn_named("my-worker", || "result").unwrap();
+
+// Builder pattern for more options
 let handle = Builder::new()
     .name("my-worker".to_string())
     .spawn(|| "result")
@@ -116,22 +112,31 @@ let handle = Builder::new()
 ### Joining threads
 
 ```rust
-// From async context (recommended, works everywhere)
-let result = handle.join_async().await.unwrap();
+use wasm_safe_thread::spawn;
 
-// From background thread only (panics on wasm main thread)
+// Synchronous join (works on native and wasm worker threads)
+let handle = spawn(|| 42);
 let result = handle.join().unwrap();
+assert_eq!(result, 42);
 
 // Non-blocking check
+let handle = spawn(|| 42);
 if handle.is_finished() {
     // Thread completed
 }
 ```
 
+For async contexts, use `join_async`:
+
+```rust
+// In an async context (e.g., with wasm_bindgen_futures::spawn_local)
+let result = handle.join_async().await.unwrap();
+```
+
 ### Thread operations
 
 ```rust
-use wasm_safe_thread::{current, sleep, yield_now, park, park_timeout};
+use wasm_safe_thread::{current, sleep, yield_now};
 use std::time::Duration;
 
 // Get current thread
@@ -139,15 +144,24 @@ let thread = current();
 println!("Thread: {:?}", thread.name());
 
 // Sleep
-sleep(Duration::from_millis(100));
+sleep(Duration::from_millis(10));
 
 // Yield to scheduler
 yield_now();
+```
 
-// Park/unpark (from background threads)
-park();                                  // Wait for unpark
-park_timeout(Duration::from_millis(100)); // Wait with timeout
-thread.unpark();                         // Wake parked thread
+Park/unpark works from background threads:
+
+```rust
+use wasm_safe_thread::{spawn, park, park_timeout};
+use std::time::Duration;
+
+let handle = spawn(|| {
+    // Park/unpark (from background threads)
+    park_timeout(Duration::from_millis(10)); // Wait with timeout
+});
+handle.thread().unpark();  // Wake parked thread
+handle.join().unwrap();  // join() requires worker context on wasm
 ```
 
 ### Event loop integration
@@ -194,6 +208,24 @@ remove_spawn_hook("my-hook");
 // Clear all hooks
 clear_spawn_hooks();
 ```
+
+### Async task tracking (WASM)
+
+When spawning async tasks inside a worker thread using `wasm_bindgen_futures::spawn_local`,
+you must notify the runtime so the worker waits for tasks to complete before exiting:
+
+```rust
+use wasm_safe_thread::{task_begin, task_finished};
+
+task_begin();
+wasm_bindgen_futures::spawn_local(async {
+    // ... async work ...
+    task_finished();
+});
+```
+
+These functions are no-ops on native platforms, so you can use them unconditionally
+in cross-platform code.
 
 ## WASM Limitations
 
