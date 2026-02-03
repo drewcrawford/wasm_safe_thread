@@ -8,13 +8,13 @@ repository = "https://github.com/drewcrawford/wasm_safe_thread"
 homepage = "https://sealedabstract.com/code/wasm_safe_thread"
 license = "MIT OR Apache-2.0"
 keywords = ["thread", "spawn", "wasm", "parallel", "concurrency"]
-categories = ["api-bindings", "asynchronous", "concurrency", "wasm", "web-programming"]
+categories = ["asynchronous", "concurrency", "wasm", "web-programming"]
 exclude = [".*"]
 rust-version = "1.85.1"
 
 
 [dependencies]
-wasm_safe_mutex = "0.1.2"
+wasm_safe_mutex = "0.2.0"
 
 [target.'cfg(target_arch="wasm32")'.dependencies]
 web-time = "1"
