@@ -1,4 +1,4 @@
 wasm_safe_thread https://sealedabstract.com/code/wasm_safe_thread
 A `std::thread` replacement for wasm with proper async integration
-Copyright 2025 Drew Crawford.
+Copyright 2025-2026 Drew Crawford.
 

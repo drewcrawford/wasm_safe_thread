@@ -233,7 +233,9 @@
 //! When spawning async tasks inside a worker thread using `wasm_bindgen_futures::spawn_local`,
 //! you must notify the runtime so the worker waits for tasks to complete before exiting:
 //!
-//! ```ignore
+//! ```
+//! # #[cfg(target_arch = "wasm32")]
+//! # {
 //! use wasm_safe_thread::{task_begin, task_finished};
 //!
 //! task_begin();
@@ -241,6 +243,7 @@
 //!     // ... async work ...
 //!     task_finished();
 //! });
+//! # }
 //! ```
 //!
 //! These functions are no-ops on native platforms, so you can use them unconditionally
