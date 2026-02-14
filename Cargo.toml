@@ -14,7 +14,10 @@ rust-version = "1.85.1"
 
 
 [dependencies]
-wasm_safe_mutex = "0.2.0"
+continue = "0.1.1"
+
+[dev-dependencies]
+test_executors = "0.4.1"
 
 [target.'cfg(target_arch="wasm32")'.dependencies]
 web-time = "1"
@@ -34,4 +37,3 @@ wasm-bindgen = { path = "../wasm_ffi" }
 wasm-bindgen-futures = { path = "../wasm_ffi/crates/futures" }
 wasm-bindgen-test = { path = "../wasm_ffi/crates/test" }
 web-sys = { path = "../wasm_ffi/crates/web-sys" }
-

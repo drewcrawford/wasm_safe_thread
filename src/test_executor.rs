@@ -74,7 +74,7 @@ where
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    use wasm_safe_mutex::mpsc::channel;
+    use crate::mpsc::channel;
 
     let (tx, rx) = channel();
 

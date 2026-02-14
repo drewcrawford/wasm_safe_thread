@@ -1,12 +1,48 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 #![cfg_attr(nightly_rustc, feature(internal_output_capture))]
-//! A `std::thread` replacement for wasm32 with proper async integration.
+//! A unified cross-platform threading and synchronization crate for native + wasm32.
 //!
 //! ![logo](https://github.com/drewcrawford/wasm_safe_thread/raw/main/art/logo.png)
 //!
-//! This crate provides a unified threading API that works across both WebAssembly and native platforms.
-//! Unlike similar crates, it's designed from the ground up to handle the async realities of browser
-//! environments.
+//! This crate provides a unified threading API and synchronization primitives that work across both
+//! WebAssembly and native platforms. Unlike similar crates, it's designed from the ground up to
+//! handle the async realities of browser environments.
+//!
+//! # Synchronization primitives
+//!
+//! Alongside thread APIs, this crate includes WebAssembly-safe synchronization primitives:
+//!
+//! - [`Mutex`]
+//! - [`rwlock::RwLock`]
+//! - [`condvar::Condvar`]
+//! - [`spinlock::Spinlock`]
+//! - [`mpsc`] channels
+//!
+//! These primitives adapt their behavior to the runtime:
+//!
+//! - **Native**: uses thread parking for efficient blocking
+//! - **WASM worker**: uses `Atomics.wait`-based blocking when available
+//! - **WASM main thread**: falls back to non-blocking/spin strategies to avoid panics
+//!
+//! ## Sync Example
+//!
+//! ```
+//! use wasm_safe_thread::Mutex;
+//!
+//! let data = Mutex::new(41);
+//! *data.lock_sync() += 1;
+//! assert_eq!(*data.lock_sync(), 42);
+//! ```
+//!
+//! ## Channel Example
+//!
+//! ```
+//! use wasm_safe_thread::mpsc::channel;
+//!
+//! let (tx, rx) = channel();
+//! tx.send_sync(5).unwrap();
+//! assert_eq!(rx.recv_sync().unwrap(), 5);
+//! ```
 //!
 //! # Comparison with wasm_thread
 //!
@@ -33,7 +69,7 @@
 //! | **std compatibility** | Custom [`Thread`]/[`ThreadId`] (similar API) | Re-exports `std::thread::{Thread, ThreadId}` |
 //! | **Worker scripts** | Inline JS via `wasm_bindgen(inline_js)` | External JS files; `es_modules` feature for module workers |
 //! | **wasm-pack targets** | ES modules (`web`) only | `web` and `no-modules` via feature flag |
-//! | **Dependencies** | wasm-bindgen, js-sys, wasm_safe_mutex | web-sys (many features), futures crate |
+//! | **Dependencies** | wasm-bindgen, js-sys, continue | web-sys (many features), futures crate |
 //! | **Thread handle** | [`JoinHandle::thread()`] returns `&Thread` | `thread()` is unimplemented (panics) |
 //!
 //! ## Shared capabilities
@@ -55,7 +91,7 @@
 //! ## Implementation differences (for maintainers)
 //!
 //! **Result passing:**
-//! - `wasm_safe_thread` uses `wasm_safe_mutex::mpsc` channels with async `recv_async()`
+//! - `wasm_safe_thread` uses its built-in `mpsc` channels with async `recv_async()`
 //! - `wasm_thread` uses `Arc<Packet<UnsafeCell>>` with a custom `Signal` primitive and `Waker` list
 //!
 //! **Async waiting:**
@@ -256,7 +292,7 @@
 //!
 //! - [`JoinHandle::join()`] - Use [`JoinHandle::join_async()`] instead
 //! - [`park()`] / [`park_timeout()`] - Only works from background threads
-//! - `Mutex::lock()` from std - Use `wasm_safe_mutex` instead
+//! - `Mutex::lock()` from std - Use `wasm_safe_thread::Mutex` instead
 //!
 //! ## SharedArrayBuffer requirements
 //!
@@ -292,13 +328,22 @@
 
 extern crate alloc;
 
+pub mod condvar;
+mod guard;
 mod hooks;
+pub mod mpsc;
+pub mod mutex;
+pub mod rwlock;
+pub mod spinlock;
 #[cfg(not(target_arch = "wasm32"))]
 mod stdlib;
+#[cfg(test)]
+mod sync_tests;
 #[doc(hidden)]
 pub mod test_executor;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
+mod wasm_support;
 
 #[cfg(not(target_arch = "wasm32"))]
 use stdlib as backend;
@@ -312,7 +357,9 @@ use std::time::Duration;
 pub use backend::yield_to_event_loop_async;
 pub use backend::{AccessError, Builder, JoinHandle, LocalKey, Thread, ThreadId};
 pub use backend::{task_begin, task_finished};
+pub use guard::Guard;
 pub use hooks::{clear_spawn_hooks, register_spawn_hook, remove_spawn_hook};
+pub use mutex::{Mutex, NotAvailable};
 
 const CONSOLE_REDIRECT_HOOK_NAME: &str = "wasm_safe_thread::println_eprintln_console_redirect";
 

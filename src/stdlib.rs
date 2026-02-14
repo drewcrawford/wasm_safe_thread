@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! Standard library backend - forwards to std::thread
 
+use crate::mpsc;
 use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::thread;
 use std::time::Duration;
-use wasm_safe_mutex::mpsc;
 
 /// A thread local storage key which owns its contents.
 pub struct LocalKey<T: 'static> {

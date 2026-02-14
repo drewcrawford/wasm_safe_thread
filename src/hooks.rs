@@ -4,8 +4,8 @@
 //! Spawn hooks are functions that run at the beginning of every spawned thread,
 //! before the main thread function. Hooks run in registration order.
 
+use crate::Mutex;
 use std::sync::Arc;
-use wasm_safe_mutex::Mutex;
 
 type SpawnHookFn = Arc<dyn Fn() + Send + Sync + 'static>;
 

@@ -9,7 +9,7 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 #[cfg(nightly_rustc)]
 // std::io::set_output_capture requires Arc<std::sync::Mutex<Vec<u8>>> specifically.
-// wasm_safe_mutex::Mutex is not type-compatible with that nightly std API.
+// crate::Mutex is not type-compatible with that nightly std API.
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
@@ -693,7 +693,7 @@ impl std::error::Error for AccessError {}
 
 /// A handle to a thread.
 pub struct JoinHandle<T> {
-    receiver: wasm_safe_mutex::mpsc::Receiver<Result<T, String>>,
+    receiver: crate::mpsc::Receiver<Result<T, String>>,
     thread: Thread,
     finished: Arc<AtomicBool>,
     /// Pointer to exit_state: [exit_code: u32, ref_count: u32] in wasm linear memory.
@@ -949,7 +949,7 @@ impl Builder {
         let exit_state = Box::new([AtomicU32::new(0), AtomicU32::new(2)]);
         let exit_state_ptr = Box::into_raw(exit_state) as u32;
 
-        let (send, recv) = wasm_safe_mutex::mpsc::channel();
+        let (send, recv) = crate::mpsc::channel();
         let closure = move || {
             // Set up TLS for current() before running user code
             CURRENT_THREAD.with(|cell| {
