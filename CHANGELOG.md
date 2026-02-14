@@ -1,0 +1,29 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+## [0.1.0] - 2026-02-03
+
+Initial release of `wasm_safe_thread`, a `std::thread` replacement for wasm32 with proper async integration.
+
+### Features
+
+- **Thread spawning** - `spawn()`, `spawn_named()`, and `Builder` pattern for creating threads that work identically on native and wasm32 targets
+- **Joining threads** - `JoinHandle::join()` for synchronous waiting, plus `join_async()` for async contexts (essential for wasm main thread)
+- **Thread operations** - `current()`, `sleep()`, `yield_now()`, `park()`, `park_timeout()`, and `Thread::unpark()` primitives
+- **Thread local storage** - `thread_local!` macro and `LocalKey` for per-thread data
+- **Spawn hooks** - `register_spawn_hook()`, `remove_spawn_hook()`, and `clear_spawn_hooks()` for running callbacks when threads start
+- **Parallelism detection** - `available_parallelism()` to query hardware concurrency
+- **Event loop integration** - `yield_to_event_loop_async()` for cooperative scheduling with the browser event loop
+- **Async task tracking** - `task_begin()` and `task_finished()` to ensure workers wait for async tasks to complete
+
+### Platform Support
+
+- Native platforms via `std::thread` backend
+- Browser environments via Web Workers with shared memory
+- Node.js via `worker_threads` module
+
+### Requirements
+
+- Rust 1.85.1+ (2024 edition)
+- For wasm32: SharedArrayBuffer support (requires COOP/COEP headers)
