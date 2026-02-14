@@ -1,8 +1,15 @@
 #!/bin/bash
 set -e
-if [[ " $* " =~ " --relaxed " ]]; then
-    export RELAXED_WARNINGS=1
-fi
+
+cargo_args=()
+for arg in "$@"; do
+    if [[ "$arg" == "--relaxed" ]]; then
+        export RELAXED_WARNINGS=1
+    else
+        cargo_args+=("$arg")
+    fi
+done
+
 source "$(dirname "$0")/_env"
 
-CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="wasm-bindgen-test-runner" RUSTFLAGS="$WASM32_RUSTFLAGS" RUSTDOCFLAGS="$WASM32_RUSTDOCFLAGS" cargo +nightly test --target=wasm32-unknown-unknown
+CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="wasm-bindgen-test-runner" RUSTFLAGS="$WASM32_RUSTFLAGS" RUSTDOCFLAGS="$WASM32_RUSTDOCFLAGS" cargo +nightly test --target=wasm32-unknown-unknown "${cargo_args[@]}"
