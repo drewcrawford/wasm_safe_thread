@@ -13,6 +13,13 @@ All notable changes to this project will be documented in this file.
 - **WASM spawn routing** - browser worker spawns now relay to the root parent context when available, avoiding nested worker startup stalls under blocking schedules.
 - **Crate root docs** - updated `src/lib.rs` documentation to describe both thread APIs and the new built-in synchronization/channel APIs.
 - **Dependency graph** - removed direct dependency on `wasm_safe_mutex`; `wasm_safe_thread` now owns these implementations internally, eliminating the local mutual-dependency risk.
+- **README synchronization** - refreshed `README.md` to match current `src/lib.rs` guidance, including wasm `join()` caveats and event-loop usage examples.
+- **WASM backend organization** - split large `src/wasm.rs` sections into `src/wasm/thread_api.rs` for maintainability while preserving behavior.
+
+### Fixed
+
+- **Release packaging defaults** - removed local `patch.crates-io` overrides used for local development so registry-based dependency resolution is used by default.
+- **Rustdoc hygiene** - fixed intra-doc links and bare URLs in native and wasm thread backend docs so `-D warnings` doc builds pass in CI.
 
 ### Removed
 
