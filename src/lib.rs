@@ -81,8 +81,7 @@
 //! Replace `use std::thread` with `use wasm_safe_thread as thread`:
 //!
 //! ```
-//! # #[cfg(target_arch = "wasm32")]
-//! # wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+//! # if cfg!(target_arch="wasm32") { return; } //join() not reliable here
 //! use wasm_safe_thread as thread;
 //!
 //! // Spawn a thread
@@ -92,6 +91,7 @@
 //! });
 //!
 //! // Wait for the thread to complete
+//! // Synchronous join (works on native and some browser context - but not reliably!)
 //! let result = handle.join().unwrap();
 //! assert_eq!(result, 42);
 //! ```
@@ -118,12 +118,11 @@
 //!
 //! ## Joining threads
 //!
-//! ```
-//! # #[cfg(target_arch = "wasm32")]
-//! # wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+//! ```no_run
+//! # if cfg!(target_arch="wasm32") { return; } //join() not reliable here
 //! use wasm_safe_thread::spawn;
 //!
-//! // Synchronous join (works on native and wasm worker threads)
+//! // Synchronous join (works on native and some browser context - but not reliably!)
 //! let handle = spawn(|| 42);
 //! let result = handle.join().unwrap();
 //! assert_eq!(result, 42);
@@ -163,8 +162,7 @@
 //! Park/unpark works from background threads:
 //!
 //! ```
-//! # #[cfg(target_arch = "wasm32")]
-//! # wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_dedicated_worker);
+//! if cfg!(target_arch="wasm32") { return } //join not reliable on wasm
 //! use wasm_safe_thread::{spawn, park, park_timeout};
 //! use std::time::Duration;
 //!
@@ -173,7 +171,7 @@
 //!     park_timeout(Duration::from_millis(10)); // Wait with timeout
 //! });
 //! handle.thread().unpark();  // Wake parked thread
-//! handle.join().unwrap();  // join() requires worker context on wasm
+//! handle.join().unwrap();  // join() is not reliable on wasm and should be avoided
 //! ```
 //!
 //! ## Event loop integration

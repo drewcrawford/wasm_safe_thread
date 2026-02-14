@@ -645,6 +645,9 @@ impl<T> fmt::Debug for JoinHandle<T> {
 
 impl<T> JoinHandle<T> {
     /// Waits for the thread to finish and returns its result.
+    ///
+    /// Unfortunately, this is almost never what you want, and is likely to prevent your workers from spanwning.
+    /// Consider [join_async] instead, or see the documentation on [spawn] for details.
     pub fn join(self) -> Result<T, Box<String>> {
         if is_main_thread() {
             return Err(Box::new(
@@ -842,6 +845,11 @@ impl Builder {
     /// - `is_finished()` to always return `false`
     /// - Deadlocks when waiting on atomics the worker should have set
     /// - Tests that hang indefinitely
+    ///
+    /// For more details on this problem and why it is hard, see implementation bugs
+    /// *  ttps://issues.chromium.org/issues/40633395
+    /// * https://bugzilla.mozilla.org/show_bug.cgi?id=1888109
+    /// * https://bugs.webkit.org/show_bug.cgi?id=271756
     pub fn spawn<F, T>(self, f: F) -> io::Result<JoinHandle<T>>
     where
         F: FnOnce() -> T + Send + 'static,
