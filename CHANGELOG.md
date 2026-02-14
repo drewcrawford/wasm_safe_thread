@@ -4,9 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Integrated synchronization primitives** - merged `wasm_safe_mutex` functionality directly into this crate, adding `Mutex`, `RwLock`, `Condvar`, `Spinlock`, and `mpsc` modules to `wasm_safe_thread`.
+
 ### Changed
 
 - **WASM spawn routing** - browser worker spawns now relay to the root parent context when available, avoiding nested worker startup stalls under blocking schedules.
+- **Crate root docs** - updated `src/lib.rs` documentation to describe both thread APIs and the new built-in synchronization/channel APIs.
+- **Dependency graph** - removed direct dependency on `wasm_safe_mutex`; `wasm_safe_thread` now owns these implementations internally, eliminating the local mutual-dependency risk.
 
 ### Removed
 
