@@ -7,6 +7,10 @@ use std::fmt;
 use std::io;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+#[cfg(nightly_rustc)]
+// std::io::set_output_capture requires Arc<std::sync::Mutex<Vec<u8>>> specifically.
+// wasm_safe_mutex::Mutex is not type-compatible with that nightly std API.
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -36,6 +40,69 @@ use std::sync::Once;
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = log)]
+    fn console_log_js(s: &str);
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error_js(s: &str);
+}
+
+#[cfg(nightly_rustc)]
+std::thread_local! {
+    static CONSOLE_CAPTURE: std::cell::RefCell<Option<Arc<StdMutex<Vec<u8>>>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(nightly_rustc)]
+fn flush_captured_prints_to_console_current_thread_impl() {
+    CONSOLE_CAPTURE.with(|slot| {
+        let capture = {
+            let borrowed = slot.borrow();
+            borrowed.as_ref().cloned()
+        };
+        let Some(capture) = capture else {
+            return;
+        };
+
+        let bytes = {
+            let mut guard = capture.lock().expect("console capture lock poisoned");
+            if guard.is_empty() {
+                return;
+            }
+            std::mem::take(&mut *guard)
+        };
+
+        let text = String::from_utf8_lossy(&bytes);
+        for line in text.lines() {
+            // internal_output_capture does not tag stdout vs stderr, so route by heuristic.
+            if line.contains(" panicked at ") {
+                console_error_js(line);
+            } else {
+                console_log_js(line);
+            }
+        }
+    });
+}
+
+#[cfg(not(nightly_rustc))]
+fn flush_captured_prints_to_console_current_thread_impl() {}
+
+pub(crate) fn redirect_println_eprintln_to_console_current_thread_impl() {
+    #[cfg(nightly_rustc)]
+    CONSOLE_CAPTURE.with(|slot| {
+        if slot.borrow().is_some() {
+            return;
+        }
+
+        // set_output_capture uses this exact buffer type internally on nightly.
+        let capture = Arc::new(StdMutex::new(Vec::new()));
+        let _ = std::io::set_output_capture(Some(Arc::clone(&capture)));
+        *slot.borrow_mut() = Some(capture);
+    });
+}
 
 /// Ensures handlers are registered exactly once.
 static INIT_HANDLERS: Once = Once::new();
@@ -908,6 +975,7 @@ impl Builder {
                 let msg = info.to_string();
                 let sent = PANIC_SENDER.with(|cell| {
                     if let Some(sender) = cell.borrow_mut().take() {
+                        flush_captured_prints_to_console_current_thread_impl();
                         sender(msg);
                         true
                     } else {
@@ -929,6 +997,8 @@ impl Builder {
             PANIC_SENDER.with(|cell| {
                 cell.borrow_mut().take();
             });
+
+            flush_captured_prints_to_console_current_thread_impl();
 
             // Mark as finished before sending result (Release pairs with Acquire in is_finished)
             finished_for_worker.store(true, Ordering::Release);

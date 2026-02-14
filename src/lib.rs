@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+#![cfg_attr(nightly_rustc, feature(internal_output_capture))]
 //! A `std::thread` replacement for wasm32 with proper async integration.
 //!
 //! ![logo](https://github.com/drewcrawford/wasm_safe_thread/raw/main/art/logo.png)
@@ -313,6 +314,8 @@ pub use backend::{AccessError, Builder, JoinHandle, LocalKey, Thread, ThreadId};
 pub use backend::{task_begin, task_finished};
 pub use hooks::{clear_spawn_hooks, register_spawn_hook, remove_spawn_hook};
 
+const CONSOLE_REDIRECT_HOOK_NAME: &str = "wasm_safe_thread::println_eprintln_console_redirect";
+
 /// Declare a new thread local storage key of type [`LocalKey`].
 ///
 /// # Examples
@@ -416,6 +419,24 @@ where
     T: Send + 'static,
 {
     Builder::new().name(name.into()).spawn(f)
+}
+
+/// Redirects `println!`/`eprintln!` for the current thread to JavaScript console output.
+///
+/// On `wasm32` + nightly this installs redirection for the calling thread.
+/// On other targets/toolchains this is a no-op.
+pub fn redirect_println_eprintln_to_console_current_thread() {
+    backend::redirect_println_eprintln_to_console_current_thread_impl();
+}
+
+/// Installs a global spawn hook that redirects `println!`/`eprintln!` to JavaScript console output.
+///
+/// On `wasm32` + nightly this causes each newly spawned thread to install redirection.
+/// On other targets/toolchains this hook has no effect.
+pub fn install_println_eprintln_console_hook() {
+    register_spawn_hook(CONSOLE_REDIRECT_HOOK_NAME, || {
+        redirect_println_eprintln_to_console_current_thread();
+    });
 }
 
 #[cfg(test)]

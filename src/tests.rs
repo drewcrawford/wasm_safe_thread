@@ -82,6 +82,29 @@ fn test_current_thread() {
     let _current = current();
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+fn test_console_redirect_api_smoke() {
+    redirect_println_eprintln_to_console_current_thread();
+    install_println_eprintln_console_hook();
+    remove_spawn_hook("wasm_safe_thread::println_eprintln_console_redirect");
+}
+
+crate::async_test! {
+    async fn test_console_redirect_emits_output_from_worker() {
+        const HOOK_NAME: &str = "wasm_safe_thread::println_eprintln_console_redirect";
+        install_println_eprintln_console_hook();
+
+        let handle = spawn(|| {
+            println!("WST_REDIRECT_TEST_STDOUT");
+            eprintln!("WST_REDIRECT_TEST_STDERR");
+        });
+        handle.join_async().await.unwrap();
+
+        remove_spawn_hook(HOOK_NAME);
+    }
+}
+
 // Test that current() returns correct thread info
 crate::async_test! {
     async fn test_current_in_spawned_thread() {

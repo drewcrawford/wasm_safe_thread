@@ -235,6 +235,8 @@ where
     }
 }
 
+pub(crate) fn redirect_println_eprintln_to_console_current_thread_impl() {}
+
 /// Gets a handle to the thread that invokes it.
 pub fn current() -> Thread {
     Thread(thread::current())
