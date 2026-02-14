@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **WASM spawn routing** - browser worker spawns now relay to the root parent context when available, avoiding nested worker startup stalls under blocking schedules.
+
+### Removed
+
+- **Experimental APIs** - removed `spawn_strict` and public broker init/state APIs introduced during investigation.
+
+### Tests
+
+- Added a wasm regression test for the `Poll::Pending -> spawn() -> wake` pattern (`test_spawn_from_poll_pending_wakes_future`) to guard against browser hangs.
+
 ## [0.1.0] - 2026-02-03
 
 Initial release of `wasm_safe_thread`, a `std::thread` replacement for wasm32 with proper async integration.

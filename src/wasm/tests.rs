@@ -3,6 +3,11 @@
 
 use super::wasm_utils::is_node;
 use super::*;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 #[wasm_bindgen_test::wasm_bindgen_test]
@@ -117,5 +122,54 @@ async fn test_join_async_error_after_value_sent() {
         result.is_err(),
         "Expected error from delayed throw after value sent, got {:?}",
         result
+    );
+}
+
+struct WakeFromSpawnFuture {
+    scheduled: bool,
+    awoken: Arc<AtomicBool>,
+}
+
+impl Future for WakeFromSpawnFuture {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.awoken.load(Ordering::SeqCst) {
+            return Poll::Ready(());
+        }
+
+        if !self.scheduled {
+            self.scheduled = true;
+            let waker = cx.waker().clone();
+            let awoken = Arc::clone(&self.awoken);
+            spawn(move || {
+                sleep(Duration::from_millis(5));
+                awoken.store(true, Ordering::SeqCst);
+                waker.wake();
+            });
+        }
+
+        Poll::Pending
+    }
+}
+
+// Repro pattern for Chrome stalls:
+// first poll calls spawn() to schedule wakeup, returns Pending, second poll should complete.
+#[wasm_bindgen_test::wasm_bindgen_test]
+async fn test_spawn_from_poll_pending_wakes_future() {
+    if is_node() {
+        return;
+    }
+
+    let awoken = Arc::new(AtomicBool::new(false));
+    let fut = WakeFromSpawnFuture {
+        scheduled: false,
+        awoken: Arc::clone(&awoken),
+    };
+    fut.await;
+
+    assert!(
+        awoken.load(Ordering::SeqCst),
+        "future should be awoken by spawned worker"
     );
 }

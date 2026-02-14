@@ -68,6 +68,8 @@ fn wasm_free_exit_state(exit_state_ptr: u32) {
 #[wasm_bindgen(inline_js = r#"
 const SELF_URL = import.meta.url;
 
+let __wstCanRelayToParent = false;
+
 // Global cleanup handler, registered once from Rust via register_cleanup_handler()
 // Called when exit_state ref_count reaches 0 to free the memory
 let __cleanup_handler = null;
@@ -181,9 +183,20 @@ export function get_shim_url_for_testing(shimName) {
 // Browser worker script - uses Web Worker API
 function makeBrowserWorkerScript(shimUrl, entryName) {
   return `
+    let __wstWorkerId = "unbound";
+    let __wstWorkerName = "";
+    let __wstExitStatePtr = 0;
     self.onmessage = async (e) => {
       try {
-        const [module, memory, work] = e.data;
+        const [module, memory, work, meta] = e.data;
+        if (meta && typeof meta === "object") {
+          __wstWorkerId = meta.__wst_id || __wstWorkerId;
+          __wstWorkerName = meta.__wst_name || __wstWorkerName;
+          __wstExitStatePtr = meta.__wst_exit_state_ptr || __wstExitStatePtr;
+          if (meta.__wst_parent_managed === true) {
+            globalThis.__wst_can_relay_to_parent = true;
+          }
+        }
 
         // Cache-bust to get fresh module state per worker (needed for Safari)
         const url = ${JSON.stringify(shimUrl)} + '?worker=' + Math.random();
@@ -197,16 +210,28 @@ function makeBrowserWorkerScript(shimUrl, entryName) {
 
         // Wait for pending async tasks to complete before exiting.
         // Tasks are tracked via task_begin()/task_finished() calls.
-        while (shim.wasm_safe_thread_pending_tasks() > 0) {
+        while (true) {
+          const pending = shim.wasm_safe_thread_pending_tasks();
+          if (pending === 0) break;
           await new Promise(resolve => setTimeout(resolve, 1));
         }
 
         // Signal exit before closing (browsers have no 'exit' event)
-        self.postMessage({ __wasm_safe_thread_exit: true });
+        self.postMessage({
+          __wasm_safe_thread_exit: true,
+          __wst_id: __wstWorkerId,
+          __wst_name: __wstWorkerName,
+          __wst_exit_state_ptr: __wstExitStatePtr
+        });
         close();
       } catch (err) {
         console.error(err);
-        self.postMessage({ __wasm_safe_thread_error: err.message || String(err) });
+        self.postMessage({
+          __wasm_safe_thread_error: err.message || String(err),
+          __wst_id: __wstWorkerId,
+          __wst_name: __wstWorkerName,
+          __wst_exit_state_ptr: __wstExitStatePtr
+        });
         throw err;
       }
     };
@@ -268,7 +293,91 @@ function signalExit(memory, exitStatePtr, exitCode) {
   Atomics.notify(i32, index, 1);  // Wake one waiter
 }
 
+function wstIsWorkerGlobal() {
+  return typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
+}
+
+function wstCanRelayToParent() {
+  if (!__wstCanRelayToParent && typeof globalThis !== "undefined" && globalThis.__wst_can_relay_to_parent === true) {
+    __wstCanRelayToParent = true;
+  }
+  return __wstCanRelayToParent === true;
+}
+
+function wstForwardSpawnToParent(payload) {
+  try {
+    self.postMessage({
+      __wst_relay_spawn: true,
+      payload,
+    });
+  } catch (err) {
+    signalExit(payload.memory, payload.exitStatePtr, 2);
+    decrementRefCountAndCleanup(payload.memory, payload.exitStatePtr);
+  }
+}
+
+function wstSpawnBrowserWorkerDirect(payload) {
+  const { work, module, memory, name, shimUrl, exitStatePtr, workerId, entryName } = payload;
+  const src = makeBrowserWorkerScript(shimUrl, entryName);
+  const blob = new Blob([src], { type: "text/javascript" });
+  const blobUrl = URL.createObjectURL(blob);
+
+  const w = new Worker(blobUrl, { type: "module", name });
+  w.onmessage = (e) => {
+    const data = e.data;
+    if (data && data.__wst_relay_spawn) {
+      const relayPayload = data.payload || null;
+      if (!relayPayload) {
+        return;
+      }
+      if (wstIsWorkerGlobal() && wstCanRelayToParent()) {
+        wstForwardSpawnToParent(relayPayload);
+      } else {
+        wstSpawnBrowserWorkerDirect({
+          work: relayPayload.work,
+          module: relayPayload.module,
+          memory: relayPayload.memory,
+          name: relayPayload.name,
+          shimUrl: relayPayload.shimUrl,
+          exitStatePtr: relayPayload.exitStatePtr,
+          workerId: relayPayload.workerId,
+          entryName,
+        });
+      }
+      return;
+    }
+
+    if (data && data.__wasm_safe_thread_exit) {
+      signalExit(memory, exitStatePtr, 1);
+      decrementRefCountAndCleanup(memory, exitStatePtr);
+    } else if (data && data.__wasm_safe_thread_error) {
+      signalExit(memory, exitStatePtr, 2);
+      decrementRefCountAndCleanup(memory, exitStatePtr);
+    }
+  };
+
+  w.onerror = (e) => {
+    console.error("Worker error:", e.message, e.filename, e.lineno);
+    signalExit(memory, exitStatePtr, 2);
+    decrementRefCountAndCleanup(memory, exitStatePtr);
+  };
+
+  w.postMessage([module, memory, work, {
+    __wst_id: workerId,
+    __wst_name: name,
+    __wst_exit_state_ptr: exitStatePtr,
+    __wst_parent_managed: true
+  }]);
+  URL.revokeObjectURL(blobUrl);
+
+  return {
+    postMessage: (msg) => w.postMessage(msg),
+    terminate: () => w.terminate(),
+  };
+}
+
 export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimName, exitStatePtr) {
+  const workerId = name + '#' + exitStatePtr;
   // Determine shim URL: use explicit name if provided, otherwise auto-detect
   let shimUrl;
   if (shimName) {
@@ -281,36 +390,24 @@ export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimNa
 
   // Browser: use Web Worker API
   if (typeof Worker === "function" && !isNode()) {
-    const src = makeBrowserWorkerScript(shimUrl, entryName);
-    const blob = new Blob([src], { type: "text/javascript" });
-    const blobUrl = URL.createObjectURL(blob);
-
-    const w = new Worker(blobUrl, { type: "module", name });
-
-    w.onmessage = (e) => {
-      const data = e.data;
-      if (data && data.__wasm_safe_thread_exit) {
-        signalExit(memory, exitStatePtr, 1);  // Success
-        decrementRefCountAndCleanup(memory, exitStatePtr);
-      } else if (data && data.__wasm_safe_thread_error) {
-        signalExit(memory, exitStatePtr, 2);  // Error
-        decrementRefCountAndCleanup(memory, exitStatePtr);
-      }
+    const payload = {
+      work,
+      module,
+      memory,
+      name,
+      shimUrl,
+      exitStatePtr,
+      workerId,
+      entryName,
     };
-
-    w.onerror = (e) => {
-      console.error("Worker error:", e.message, e.filename, e.lineno);
-      signalExit(memory, exitStatePtr, 2);  // Error
-      decrementRefCountAndCleanup(memory, exitStatePtr);
-    };
-
-    w.postMessage([module, memory, work]);
-    URL.revokeObjectURL(blobUrl);
-
-    return {
-      postMessage: (msg) => w.postMessage(msg),
-      terminate: () => w.terminate(),
-    };
+    if (wstIsWorkerGlobal() && wstCanRelayToParent()) {
+      wstForwardSpawnToParent(payload);
+      return {
+        postMessage: (_msg) => {},
+        terminate: () => {},
+      };
+    }
+    return wstSpawnBrowserWorkerDirect(payload);
   }
 
   // Node: use worker_threads (synchronous creation is critical!)
@@ -340,7 +437,11 @@ export function wasm_safe_thread_spawn_worker(work, module, memory, name, shimNa
       console.error("Worker error:", e);
     });
 
-    w.postMessage([module, memory, work]);
+    w.postMessage([module, memory, work, {
+      __wst_id: workerId,
+      __wst_name: name,
+      __wst_exit_state_ptr: exitStatePtr
+    }]);
 
     return {
       postMessage: (msg) => w.postMessage(msg),
@@ -387,6 +488,7 @@ export function wait_for_exit_async(memory, ptr) {
     poll();
   });
 }
+
 "#)]
 extern "C" {
     fn register_cleanup_handler(handler: &JsValue);
@@ -402,7 +504,6 @@ extern "C" {
     fn get_detected_shim_url() -> Option<String>;
     fn get_performance_resources_debug() -> String;
     fn wait_for_exit_async(memory: &JsValue, ptr: u32) -> js_sys::Promise;
-
     type WorkerLike;
 
     #[wasm_bindgen(method, js_name = postMessage)]
@@ -451,7 +552,6 @@ pub fn spawn_with_shared_module(
         shim_name,
         exit_state_ptr,
     );
-
     WorkerHandle { worker }
 }
 
