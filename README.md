@@ -5,7 +5,51 @@
 
 A `std::thread` + `std::sync` replacement for wasm32 with proper async integration.
 
-This crate provides a unified threading API and synchronization primitives that work across both WebAssembly and native platforms. In practice, you can treat it as a cross-platform replacement for much of `std::thread` plus key `std::sync` primitives.
+This crate provides a unified threading API and synchronization primitives that work across both WebAssembly and native platforms. In practice, you can treat it as a cross-platform replacement for much of `std::thread` plus key `std::sync` primitives. Unlike similar crates, it's designed from the ground up to handle the async realities of browser environments.
+
+## Synchronization primitives
+
+Alongside thread APIs, this crate includes WebAssembly-safe synchronization primitives:
+
+- `Mutex`
+- `RwLock`
+- `Condvar`
+- `Spinlock`
+- `mpsc` channels
+
+These APIs are usable on their own; you do not need to spawn threads with this crate to use
+`Mutex`, `RwLock`, `Condvar`, or `mpsc`.
+
+These primitives adapt their behavior to the runtime:
+
+- **Native**: uses thread parking for efficient blocking
+- **WASM worker**: uses `Atomics.wait`-based blocking when available
+- **WASM main thread**: falls back to non-blocking/spin strategies to avoid panics
+
+### Sync example
+
+```rust
+use wasm_safe_thread::Mutex;
+
+let data = Mutex::new(41);
+*data.lock_sync() += 1;
+assert_eq!(*data.lock_sync(), 42);
+```
+
+### Channel example
+
+```rust
+use wasm_safe_thread::mpsc::channel;
+
+let (tx, rx) = channel();
+tx.send_sync(5).unwrap();
+assert_eq!(rx.recv_sync().unwrap(), 5);
+```
+
+## Threading primitives
+
+In addition to synchronization primitives, this crate provides a `std::thread`-like API:
+`spawn()`, `Builder`, `JoinHandle`, `park()`, `Thread::unpark()`, thread locals, and spawn hooks.
 
 ## Comparison with wasm_thread
 
@@ -29,7 +73,7 @@ This crate provides a unified threading API and synchronization primitives that 
 | **std compatibility** | Custom `Thread`/`ThreadId` (similar API) | Re-exports `std::thread::{Thread, ThreadId}` |
 | **Worker scripts** | Inline JS via `wasm_bindgen(inline_js)` | External JS files; `es_modules` feature for module workers |
 | **wasm-pack targets** | ES modules (`web`) only | `web` and `no-modules` via feature flag |
-| **Dependencies** | wasm-bindgen, js-sys, wasm_safe_mutex | web-sys (many features), futures crate |
+| **Dependencies** | wasm-bindgen, js-sys, continue | web-sys (many features), futures crate |
 | **Thread handle** | `thread()` returns `&Thread` | `thread()` is unimplemented (panics) |
 
 ### Shared capabilities
@@ -49,7 +93,7 @@ Both crates provide:
 ### Implementation differences (for maintainers)
 
 **Result passing:**
-- `wasm_safe_thread` uses `wasm_safe_mutex::mpsc` channels with async `recv_async()`
+- `wasm_safe_thread` uses its built-in `mpsc` channels with async `recv_async()`
 - `wasm_thread` uses `Arc<Packet<UnsafeCell>>` with a custom `Signal` primitive and `Waker` list
 
 **Async waiting:**
@@ -73,9 +117,10 @@ Both crates provide:
 
 ## Usage
 
-Replace `use std::thread` (and relevant `std::sync` primitives) with `wasm_safe_thread` APIs:
+Replace `use std::thread` with `use wasm_safe_thread as thread`:
 
 ```rust
+# if cfg!(target_arch="wasm32") { return; } //join() not reliable here
 use wasm_safe_thread as thread;
 
 // Spawn a thread
@@ -85,6 +130,7 @@ let handle = thread::spawn(|| {
 });
 
 // Wait for the thread to complete
+// Synchronous join (works on native and some browser context - but not reliably!)
 let result = handle.join().unwrap();
 assert_eq!(result, 42);
 ```
@@ -112,9 +158,10 @@ let handle = Builder::new()
 ### Joining threads
 
 ```rust
+# if cfg!(target_arch="wasm32") { return; } //join() not reliable here
 use wasm_safe_thread::spawn;
 
-// Synchronous join (works on native and wasm worker threads)
+// Synchronous join (works on native and some browser context - but not reliably!)
 let handle = spawn(|| 42);
 let result = handle.join().unwrap();
 assert_eq!(result, 42);
@@ -124,6 +171,7 @@ let handle = spawn(|| 42);
 if handle.is_finished() {
     // Thread completed
 }
+# drop(handle);
 ```
 
 For async contexts, use `join_async`:
@@ -153,6 +201,7 @@ yield_now();
 Park/unpark works from background threads:
 
 ```rust
+# if cfg!(target_arch="wasm32") { return } //join not reliable on wasm
 use wasm_safe_thread::{spawn, park, park_timeout};
 use std::time::Duration;
 
@@ -161,16 +210,23 @@ let handle = spawn(|| {
     park_timeout(Duration::from_millis(10)); // Wait with timeout
 });
 handle.thread().unpark();  // Wake parked thread
-handle.join().unwrap();  // join() requires worker context on wasm
+handle.join().unwrap();  // join() is not reliable on wasm and should be avoided
 ```
 
 ### Event loop integration
 
 ```rust
+# #[cfg(not(target_arch = "wasm32"))]
+# fn main() {
 use wasm_safe_thread::yield_to_event_loop_async;
 
 // Yield to browser event loop (works on native too)
+# wasm_safe_thread::test_executor::spawn(async {
 yield_to_event_loop_async().await;
+# });
+# }
+# #[cfg(target_arch = "wasm32")]
+# fn main() {} // JsFuture is !Send, tested separately via wasm_bindgen_test
 ```
 
 ### Thread local storage
