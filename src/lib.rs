@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 #![cfg_attr(nightly_rustc, feature(internal_output_capture))]
-//! A unified cross-platform threading and synchronization crate for native + wasm32.
+//! A unified cross-platform `std::thread` + `std::sync` replacement for native + wasm32.
 //!
 //! ![logo](https://github.com/drewcrawford/wasm_safe_thread/raw/main/art/logo.png)
 //!
 //! This crate provides a unified threading API and synchronization primitives that work across both
-//! WebAssembly and native platforms. Unlike similar crates, it's designed from the ground up to
-//! handle the async realities of browser environments.
+//! WebAssembly and native platforms. In practice, you can treat it as a cross-platform replacement
+//! for much of `std::thread` plus key `std::sync` primitives. Unlike similar crates, it's designed
+//! from the ground up to handle the async realities of browser environments.
 //!
 //! # Synchronization primitives
 //!
@@ -17,6 +18,9 @@
 //! - [`condvar::Condvar`]
 //! - [`spinlock::Spinlock`]
 //! - [`mpsc`] channels
+//!
+//! These APIs are usable on their own; you do not need to spawn threads with this crate to use
+//! [`Mutex`], [`RwLock`](rwlock::RwLock), [`Condvar`](condvar::Condvar), or [`mpsc`].
 //!
 //! These primitives adapt their behavior to the runtime:
 //!
@@ -43,6 +47,12 @@
 //! tx.send_sync(5).unwrap();
 //! assert_eq!(rx.recv_sync().unwrap(), 5);
 //! ```
+//!
+//! # Threading primitives
+//!
+//! In addition to synchronization primitives, this crate provides a `std::thread`-like API:
+//! [`spawn()`], [`Builder`], [`JoinHandle`], [`park()`], [`Thread::unpark()`], thread locals,
+//! and spawn hooks.
 //!
 //! # Comparison with wasm_thread
 //!
@@ -329,7 +339,7 @@
 extern crate alloc;
 
 pub mod condvar;
-mod guard;
+pub mod guard;
 mod hooks;
 pub mod mpsc;
 pub mod mutex;

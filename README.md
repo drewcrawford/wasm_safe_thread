@@ -3,9 +3,9 @@
 
 ![logo](art/logo.png)
 
-A `std::thread` replacement for wasm32 with proper async integration.
+A `std::thread` + `std::sync` replacement for wasm32 with proper async integration.
 
-This crate provides a unified threading API that works across both WebAssembly and native platforms. Unlike similar crates, it's designed from the ground up to handle the async realities of browser environments.
+This crate provides a unified threading API and synchronization primitives that work across both WebAssembly and native platforms. In practice, you can treat it as a cross-platform replacement for much of `std::thread` plus key `std::sync` primitives.
 
 ## Comparison with wasm_thread
 
@@ -73,7 +73,7 @@ Both crates provide:
 
 ## Usage
 
-Replace `use std::thread` with `use wasm_safe_thread as thread`:
+Replace `use std::thread` (and relevant `std::sync` primitives) with `wasm_safe_thread` APIs:
 
 ```rust
 use wasm_safe_thread as thread;
