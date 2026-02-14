@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! WebAssembly backend - placeholder implementation
 
-mod wasm_utils;
 mod thread_api;
+mod wasm_utils;
 
 use std::fmt;
 use std::io;
@@ -15,13 +15,13 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::Duration;
 
-use wasm_utils::{
-    atomics_wait_timeout_ms_try, get_available_parallelism, is_main_thread, park_notify_at_addr,
-    park_wait_at_addr, park_wait_timeout_at_addr, sleep_sync_ms, yield_to_event_loop,
-};
 pub use thread_api::{
     AccessError, Builder, JoinHandle, LocalKey, Thread, ThreadId, available_parallelism, current,
     park, park_timeout, sleep, spawn, yield_now, yield_to_event_loop_async,
+};
+use wasm_utils::{
+    atomics_wait_timeout_ms_try, get_available_parallelism, is_main_thread, park_notify_at_addr,
+    park_wait_at_addr, park_wait_timeout_at_addr, sleep_sync_ms, yield_to_event_loop,
 };
 
 static THREAD_COUNTER: AtomicU64 = AtomicU64::new(0);
